@@ -1,0 +1,3 @@
+discord.py>=2.4
+python-dotenv>=1.0
+# anthropic>=0.40   # 선택: ROUTE_* 에 `api`(토큰 과금)를 직접 적을 때만 필요

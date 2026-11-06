@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.researchlab.agent</string>
+  <!-- caffeinate: 연구실이 도는 동안 맥이 유휴 상태로 잠들지 않게 한다(-i), 전원 연결 시 시스템 잠자기도 막는다(-s) -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>-s</string>
+    <string>__PYTHON__</string>
+    <string>-m</string>
+    <string>lab.main</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__ROOT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <key>SSL_CERT_FILE</key>
+    <string>__SSL_CERT_FILE__</string>
+    <key>REQUESTS_CA_BUNDLE</key>
+    <string>__SSL_CERT_FILE__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>__ROOT__/workspace/logs/lab.log</string>
+  <key>StandardErrorPath</key>
+  <string>__ROOT__/workspace/logs/lab.log</string>
+</dict>
+</plist>
