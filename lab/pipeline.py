@@ -11,7 +11,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .agents import label, model_for, system_for
+from .agents import ROLE_META, label, model_for, system_for
 from .config import ROOT, Config
 from .ledger import PHASE_STATUS, Ledger
 from .llm import BudgetExceeded, NoBackend, Stopped, run_agent
@@ -248,10 +248,13 @@ class Lab:
                                f"원인: {_short(str(e), 600)}\n이어서 하려면 `/resume {eid}`")
 
     # ================= 공통 도우미 =================
-    def _say(self, eid: str, text: str, files: list[Path] | None = None) -> None:
+    def _say(self, eid: str, text: str, files: list[Path] | None = None, role: str | None = None) -> None:
+        """진행 알림. 'label(역할)'로 시작하는 문장은 그 역할의 팀원 봇 이름으로 나간다."""
         self.ledger.add_event(eid, "progress", text)
+        if role is None:
+            role = next((r for r in ROLE_META if text.startswith(label(r))), None)
         try:
-            self.notifier.post(self.ledger.get(eid), text, files)
+            self.notifier.post(self.ledger.get(eid), text, files, role=role)
         except Exception:
             log.exception("notify failed")
 
@@ -352,12 +355,12 @@ class Lab:
     def _post_memos(self, eid: str, title: str, memos: dict[str, dict]) -> None:
         if not memos:
             return
-        lines = [title]
-        for role, m in memos.items():
-            lines.append(f"\n{label(role)}: {_short(m.get('summary', ''), 300)}")
+        self._say(eid, title)
+        for role, m in memos.items():                     # 전문가마다 자기 이름으로 올린다
+            lines = [f"{label(role)}: {_short(m.get('summary', ''), 300)}"]
             for c in m.get("key_concerns", [])[:3]:
                 lines.append(f"  ⚠️ {_short(c, 200)}")
-        self._say(eid, "\n".join(lines))
+            self._say(eid, "\n".join(lines), role=role)
 
     # ================= 단계 1: 전문가 자문 =================
     def _phase_consult(self, exp: dict) -> bool:

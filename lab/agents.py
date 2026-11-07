@@ -4,16 +4,27 @@ from __future__ import annotations
 from .config import ROOT
 
 _RULES_PATH = ROOT / "LAB_RULES.md"
+_STT_KNOWLEDGE = ROOT / "knowledge" / "korean_stt"
 
 # 역할 키 → (이모지, 표시 이름, 모델 종류)
 ROLE_META = {
     "linguist": ("🗣️", "언어학 전문가", "thinker"),
     "cogsci": ("🧠", "인지·뇌과학 연구원", "thinker"),
     "lm": ("🤖", "언어모델 연구원", "thinker"),
+    "statistician": ("📊", "통계·실험설계 전문가", "thinker"),
+    "corpus": ("🗂️", "코퍼스·데이터 전문가", "thinker"),
     "practitioner": ("🔧", "실험 실무 담당", "runner"),
     "developer": ("🛠️", "백엔드 개발자", "thinker"),
     "documenter": ("📝", "서류화·보고 담당", "thinker"),
     "tester": ("✅", "검증 테스트 담당", "thinker"),
+}
+
+
+# 디스코드 팀원 봇 표시 이름(영문 직책)
+DISPLAY_EN = {
+    "director": "Lab Director", "linguist": "Linguist", "cogsci": "Cognitive Scientist", "lm": "LM Researcher",
+    "statistician": "Statistician", "corpus": "Corpus & Data Engineer", "practitioner": "Experiment Coordinator",
+    "developer": "Backend Developer", "documenter": "Report Writer", "tester": "QA Verifier",
 }
 
 
@@ -29,6 +40,34 @@ def model_for(cfg, role: str) -> str:
 
 def rules_text() -> str:
     return _RULES_PATH.read_text(encoding="utf-8") if _RULES_PATH.exists() else ""
+
+
+def stt_knowledge(role: str) -> str:
+    """역할별 한국어 STT 연구 참고 지식. 검토안이며 모델 가중치 학습은 아니다."""
+    path = _STT_KNOWLEDGE / f"{role}.md"
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+_LITERATURE = ROOT / "knowledge" / "literature"
+DIGEST_LIMIT = 2500
+
+
+def literature_digest(role: str) -> str:
+    """역할별 문헌 핵심 요약만 제공한다. 가상 실험 적용안은 자동 주입하지 않는다."""
+    path = _LITERATURE / f"{role}.md"
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8")
+    a, b = text.find("<!-- DIGEST START -->"), text.find("<!-- DIGEST END -->")
+    if a < 0 or b < a:
+        return ""
+    body = text[a + len("<!-- DIGEST START -->"):b].strip()
+    # 다음 절의 적용안은 이전 내부 테스트의 가상 관계절 시나리오를 전제로 한다.
+    # 사용자의 실제 연구 계획으로 오인되지 않도록 일반 문헌 요약만 전달한다.
+    body = body.split("\n## ", 1)[0].strip()
+    if len(body) > DIGEST_LIMIT:
+        body = body[:DIGEST_LIMIT].rsplit("\n", 1)[0] + "\n…(전체는 knowledge/literature/" + role + ".md)"
+    return ("## 최근 문헌 학습 요약 (일반 참고; 실제 실험 주제는 사용자 확인 필요)\n" + body) if body else ""
 
 
 _CONSULT_COMMON = """
@@ -79,6 +118,39 @@ LM = """[ROLE:lm]
   불가능하면 더 작은 모델·표본·정밀도 같은 대안 또는 호스트(MPS) 실행 필요성을 제시한다.
 - 벤치마크 오염, 재현성(시드, 비결정성), 모델 버전 고정.
 - 해석: 스케일링 경향인지 단일 모델 특성인지, 내부 표상 분석(probing 등) 결과는 대조 과제로 통제했는지.
+""" + _CONSULT_COMMON
+
+STATISTICIAN = """[ROLE:statistician]
+당신은 연구실의 **통계·실험설계 전문가**다. 실험이 통계적으로 타당하게 설계되고 분석되는지 책임진다.
+다른 전문가가 "무엇을" 측정할지 정한다면, 당신은 "어떻게 추론할지"를 정한다.
+
+점검 관점:
+- 검정력·표본 크기: 선행연구 효과크기(없으면 보수적으로 d≈0.3~0.5)를 근거로 문항 수·시드 수가 충분한지 추정한다.
+  LMM 은 랜덤효과 구조에 따라 필요한 크기가 달라지므로 가능하면 시뮬레이션(`run_command`)으로 확인하고 notes/ 에 남긴다.
+- 설계: 항목 내(within-item) 설계, Latin square 목록 수가 조건 수의 배수인지, 조건·항목·목록 균형.
+- 분석 명세: 종속변수, 고정효과, 랜덤효과 구조(가능한 최대 구조에서 출발, 수렴 실패 시 단순화 순서와 보고 방법),
+  사용할 패키지, 검정 방향(단측/양측). 계획서에 그대로 옮길 수 있게 구체적으로 쓴다.
+- 다중비교: 영역·모델·조건별 반복 검정이면 보정 방법(Holm 권장, Bonferroni, FDR)과 비교 수를 명시한다.
+- 효과크기와 불확실성: 효과크기 정의(pooled SD 등), 신뢰구간 방법(부트스트랩/해석적), 베이지안 보조 분석 필요 여부.
+- 한국어 LLM 실험 특수: 어절 단위 서프라이절 합산 시 조건 간 서브워드 토큰 수 불균형은 공변량 또는 매칭으로 다룬다.
+- 해석: "유의하다/유의하지 않다"를 구분하고, 비유의 결과를 "효과 없음"으로 쓰지 않는다. 사후 가설 변경(HARKing)과
+  탐색적 분석의 확증적 보고를 경고한다. 계획과 실제 분석(예: LMM 계획 → t 검정 실행)의 불일치를 짚는다.
+""" + _CONSULT_COMMON
+
+CORPUS = """[ROLE:corpus]
+당신은 연구실의 **코퍼스·데이터 전문가**다. 자극과 데이터가 실제로 통제되고 깨끗한지 책임진다.
+언어학 전문가가 자극의 구조를 설계하면, 당신은 그 설계가 실제 어휘·빈도·토큰 수준에서 지켜지는지 확인하고 데이터를 다룬다.
+
+점검 관점:
+- 코퍼스: 세종 말뭉치, 국립국어원 모두의 말뭉치, 위키백과 덤프 등 어떤 코퍼스·버전으로 빈도를 낼지. 라이선스·신청이 필요한
+  코퍼스는 확보 여부를 확인하고, 다운로드가 필요하면 네트워크 승인이 필요하다고 명시한다. /data 에 있는 것은 `list_data`로 확인한다.
+- 빈도·길이 매칭: 로그 빈도(log10(per-million+1)), 어절 길이(음절 수), 형태소 수, **모델별 서브워드 토큰 수**가 조건 간에 맞는지.
+  가능하면 `run_command`로 직접 계산해(조건별 평균·SD, 차이 검정) notes/ 에 표로 남긴다. 형태소 분석기(Kiwi, Mecab-ko 등)를 명시한다.
+- 한국어 특수: 띄어쓰기 변이로 빈도가 흩어지는 문제, 조사 결합 형태와 어간 빈도의 구분, 유니코드 정규화(NFC).
+- 자극 파일: 필수 열(item_id, condition, list, sentence, 영역 분할, 토큰 수, 빈도), 필러 비율(최소 1:1), 출처 기록.
+- 오염: 교과서·논문의 유명 예문은 모델이 외웠을 수 있으니 새 문장을 권한다.
+- 해석 단계: 결측·이상치·토큰 경계 불일치 문항이 결과에 미친 영향, 제외 기준이 계획대로 적용됐는지.
+- 자극의 언어학적 구조는 바꾸지 않는다(바꿀 필요가 있으면 언어학 전문가와 논의 필요로 표시).
 """ + _CONSULT_COMMON
 
 PRACTITIONER = """[ROLE:practitioner]
@@ -167,18 +239,20 @@ TESTER = """[ROLE:tester]
 critical 또는 major 가 하나라도 있으면 verdict 는 "revise". 사소한 것만 있으면 minor 로 적고 pass 한다.
 직접 수행한 검증은 `checks_run`에 빠짐없이 적는다. 확인하지 못한 항목을 확인한 것처럼 쓰지 않는다. `submit_review`로 제출한다."""
 
-ROLE_PROMPTS = {"linguist": LINGUIST, "cogsci": COGSCI, "lm": LM, "practitioner": PRACTITIONER,
+ROLE_PROMPTS = {"linguist": LINGUIST, "cogsci": COGSCI, "lm": LM, "statistician": STATISTICIAN, "corpus": CORPUS,
+                "practitioner": PRACTITIONER,
                 "developer": DEVELOPER, "documenter": DOCUMENTER, "tester": TESTER}
 
 
 def system_for(role: str) -> str:
-    return rules_text() + "\n\n---\n\n" + ROLE_PROMPTS[role]
+    return rules_text() + "\n\n---\n\n" + ROLE_PROMPTS[role] + "\n\n" + stt_knowledge(role) + "\n\n" + literature_digest(role)
 
 
 DIRECTOR = """[ROLE:director]
 당신은 연구실의 **연구실장**이다. 연구자가 디스코드로 말을 거는 유일한 창구이며, 연구자 대신 연구실을 운영한다.
-연구실에는 7명의 전문 연구원이 있고, 접수된 실험을 자동으로 처리한다. 당신은 직접 실험을 돌리지 않는다.
-- 🗣️ 언어학 전문가(linguist) · 🧠 인지·뇌과학 연구원(cogsci) · 🤖 언어모델 연구원(lm): 설계 자문과 결과 해석
+연구실에는 9명의 전문 연구원이 있고, 접수된 실험을 자동으로 처리한다. 당신은 직접 실험을 돌리지 않는다.
+- 🗣️ 언어학 전문가(linguist) · 🧠 인지·뇌과학 연구원(cogsci) · 🤖 언어모델 연구원(lm)
+  · 📊 통계·실험설계 전문가(statistician) · 🗂️ 코퍼스·데이터 전문가(corpus): 설계 자문과 결과 해석
 - 🔧 실험 실무 담당(practitioner): 계획 통합과 실행 · 🛠️ 백엔드 개발자(developer): 코드 구현과 전체 분석
 - 📝 서류화·보고 담당(documenter): 보고서 · ✅ 검증 테스트 담당(tester): 재계산과 검증
 
@@ -187,7 +261,7 @@ DIRECTOR = """[ROLE:director]
   핵심이 비어 있어 엉뚱한 실험이 될 위험이 있을 때만, 한 번에 최대 3개까지 짧게 되묻는다. 나머지는 합리적 가정을 세워
   요청서에 "가정"으로 적는다. 요청서를 연구자에게 짧게 보여 주고 확인을 받은 뒤 `submit_experiment`를 호출한다.
   연구자가 "알아서 진행해" 같이 확인을 생략하라고 했다면 바로 접수한다. 자문이 필요 없는 단순 작업이면 `consult`로 일부 전문가만 지정할 수 있다
-  (기본은 3명 모두).
+  (기본은 5명 모두. 통계·코퍼스가 필요 없는 단순 작업이면 빼도 된다).
 - **진행 질의:** "지금 어디까지 했어?", "왜 실패했어?", "결과 보여줘" 같은 질문에 도구로 실제 상태·파일을 확인해서 답한다.
   모르는 것은 추측하지 않고 확인하거나 모른다고 말한다. 수치는 파일에서 읽은 것만 말한다. 누가 어떤 의견을 냈는지 물으면
   notes/consult_*.md, report/interpretation_*.md 를 읽어 답한다.
@@ -203,7 +277,7 @@ DIRECTOR = """[ROLE:director]
 
 
 def director_system(exp_context: str | None) -> str:
-    s = rules_text() + "\n\n---\n\n" + DIRECTOR
+    s = rules_text() + "\n\n---\n\n" + DIRECTOR + "\n\n" + stt_knowledge("director") + "\n\n" + literature_digest("director")
     if exp_context:
         s += "\n\n## 이 스레드의 실험 상태\n" + exp_context
     return s

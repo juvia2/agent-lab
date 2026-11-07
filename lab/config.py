@@ -19,6 +19,8 @@ DEFAULT_ROUTES = {
     "linguist": "claude/opus, gemini, codex",
     "cogsci": "claude/opus, gemini, codex",
     "lm": "claude/opus, gemini, codex",
+    "statistician": "claude/opus, gemini, codex",
+    "corpus": "local, claude/sonnet, gemini",
     "developer": "codex, claude/sonnet, local",
     "practitioner": "local, gemini, claude/sonnet",
     "documenter": "local, claude/sonnet, gemini",
@@ -54,8 +56,9 @@ class Config:
     discord_owner_id: int | None
     discord_guild_id: int | None
     intake_channel: str
-    progress_channel: str
     report_channel: str
+    perf_channel: str             # 에이전트 성능 향상(학습·테스트) 리포트 전용. 연구 진행 채널과 분리
+    test_channel: str             # 봇 접속·권한·개발 점검 전용
     model_director: str
     model_thinker: str
     model_runner: str
@@ -89,9 +92,10 @@ class Config:
             discord_token=e("DISCORD_TOKEN") or None,
             discord_owner_id=_discord_id("DISCORD_OWNER_ID"),
             discord_guild_id=_discord_id("DISCORD_GUILD_ID"),
-            intake_channel=e("INTAKE_CHANNEL", "실험요청"),
-            progress_channel=e("PROGRESS_CHANNEL", "진행현황"),
-            report_channel=e("REPORT_CHANNEL", "보고서"),
+            intake_channel=e("INTAKE_CHANNEL", "실험진행"),
+            report_channel=e("REPORT_CHANNEL", "results-산출물"),
+            perf_channel=e("PERF_CHANNEL", "성능고도화"),
+            test_channel=e("TEST_CHANNEL", "봇점검"),
             model_director=e("MODEL_DIRECTOR", "claude-sonnet-5-5"),
             model_thinker=e("MODEL_THINKER", "claude-opus-5-5"),
             model_runner=e("MODEL_RUNNER", "claude-sonnet-5-5"),

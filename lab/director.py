@@ -36,7 +36,7 @@ DIRECTOR_TOOLS = [
          "request_markdown": {"type": "string", "description": "요청서 전문(제목/연구 질문·가설/데이터/방법/완료 기준/제약/가정)"},
          "priority": {"type": "integer", "default": 0},
          "consult": {"type": "array", "items": {"type": "string", "enum": list(CONSULTANTS)},
-                     "description": "자문·해석에 참여할 전문가. 생략하면 3명 모두"}},
+                     "description": "자문·해석에 참여할 전문가. 생략하면 5명 모두"}},
          "required": ["title", "request_markdown"]}},
     {"name": "stop_experiment", "description": "실험을 중단한다.",
      "input_schema": {"type": "object", "properties": {"exp_id": _ID}, "required": ["exp_id"]}},

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .llm import ToolOutput
 
-CONSULTANTS = ("linguist", "cogsci", "lm")          # 도메인 전문가 3인
+CONSULTANTS = ("linguist", "cogsci", "lm", "statistician", "corpus")   # 자문·해석 전문가 5인
 ROLES = CONSULTANTS + ("practitioner", "developer", "documenter", "tester")
 
 # ---- 역할별 쓰기 허용 위치 (실험 폴더 기준) ----
@@ -252,7 +252,7 @@ class Toolbox:
         if now - self._last_progress < 45:
             return ToolOutput("너무 자주 보고함. 잠시 후 다시.")
         self._last_progress = now
-        self.notify.post({"id": self.exp_id}, f"📡 {message[:900]}")
+        self.notify.post({"id": self.exp_id}, f"📡 {message[:900]}", role=self.role)
         return ToolOutput("보고함")
 
     # ---- 종료 도구: payload 만 돌려주고 루프를 끝낸다 ----

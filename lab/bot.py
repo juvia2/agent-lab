@@ -11,6 +11,7 @@ from pathlib import Path
 import discord
 from discord import app_commands
 
+from . import learning
 from .notify import Notifier
 from .pipeline import PHASE_LABEL, STATUS_LABEL
 
@@ -78,6 +79,7 @@ class DiscordNotifier(Notifier):
     def __init__(self, cfg):
         self.cfg = cfg
         self.bot: LabBot | None = None
+        self.members: dict = {}           # 역할 → MemberBot (토큰이 있는 팀원만)
 
     def _run(self, coro, timeout: float = 120):
         if not self.bot or not self.bot.loop or not self.bot.is_ready():
@@ -90,8 +92,8 @@ class DiscordNotifier(Notifier):
             log.exception("디스코드 전송 실패")
             return None
 
-    def post(self, exp, text, files=None):
-        self._run(self._post(exp, text, files))
+    def post(self, exp, text, files=None, role=None):
+        self._run(self._post(exp, text, files, role))
 
     def post_report(self, exp, text, files=None):
         self._run(self._post(exp, text, files))
@@ -114,7 +116,7 @@ class DiscordNotifier(Notifier):
                     return ch
                 except discord.DiscordException:
                     log.warning("스레드 %s 를 찾지 못함", tid)
-        return await self._named(self.cfg.progress_channel)
+        return await self._named(self.cfg.intake_channel if exp else self.cfg.test_channel)
 
     async def _named(self, name: str):
         for g in self.bot.guilds:
@@ -143,8 +145,17 @@ class DiscordNotifier(Notifier):
             last = i == len(parts) - 1
             await ch.send(p, files=attach[:10] if last and attach else None, view=view if last else None)
 
-    async def _post(self, exp, text, files):
-        await self._send(await self._channel_for(exp), text, files)
+    async def _post(self, exp, text, files, role=None):
+        ch = await self._channel_for(exp)
+        member = self.members.get(role) if role else None
+        if member is not None and member.is_ready() and isinstance(ch, (discord.TextChannel, discord.Thread)):
+            try:                          # 같은 스레드에 그 역할의 봇 이름으로 올린다
+                mch = member.get_channel(ch.id) or await member.fetch_channel(ch.id)
+                await self._send(mch, text, files)
+                return
+            except discord.DiscordException:
+                log.warning("%s 봇으로 전송 실패 → 연구실장 봇이 대신 보냄", role)
+        await self._send(ch, text, files)
 
     async def _post_named(self, name, text, files):
         await self._send(await self._named(name), text, files)
@@ -164,7 +175,7 @@ class DiscordNotifier(Notifier):
 # ===================== 봇 =====================
 class LabBot(discord.Client):
     def __init__(self, cfg, lab, director, notifier: DiscordNotifier, stop_event: threading.Event,
-                 startup_note: str = ""):
+                 startup_note: str = "", members: list | None = None, registry=None):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
@@ -173,11 +184,17 @@ class LabBot(discord.Client):
         self.tree = LabTree(self)
         self._locks: dict[int, asyncio.Lock] = {}
         self._started = False
+        self.members = members or []          # [(MemberBot, token), ...]
+        self.registry = registry
+        notifier.members = {m.role: m for m, _ in self.members}
+        self._member_tasks: list[asyncio.Task] = []
         self._register_commands()
 
     # ---- 시작 ----
     async def setup_hook(self):
         self.add_dynamic_items(ApprovalButton)
+        for member, token in self.members:     # 팀원 봇들은 같은 이벤트 루프에서 접속한다
+            self._member_tasks.append(asyncio.create_task(self._run_member(member, token)))
         if self.cfg.discord_guild_id:
             g = discord.Object(id=self.cfg.discord_guild_id)
             self.tree.copy_global_to(guild=g)
@@ -185,7 +202,29 @@ class LabBot(discord.Client):
         else:
             await self.tree.sync()
 
+    async def _run_member(self, member, token):
+        try:
+            await member.start(token)
+        except discord.LoginFailure:
+            log.error("%s 봇 토큰이 잘못됐습니다(.env 의 BOT_TOKEN_%s). 이 팀원만 빼고 계속합니다.",
+                      member.role, member.role.upper())
+        except discord.PrivilegedIntentsRequired:
+            log.error("%s 봇: Developer Portal 에서 MESSAGE CONTENT INTENT 를 켜야 합니다. 이 팀원만 빼고 계속합니다.",
+                      member.role)
+        except Exception:
+            log.exception("%s 봇 접속 오류", member.role)
+
+    async def close(self):
+        for member, _ in self.members:
+            try:
+                await member.close()
+            except Exception:
+                pass
+        await super().close()
+
     async def on_ready(self):
+        if self.registry is not None:
+            self.registry.add(self.user.id, "director")
         if self._started:
             return
         self._started = True
@@ -193,14 +232,16 @@ class LabBot(discord.Client):
         await self._ensure_channels()
         recovered = self.lab.ledger.reset_interrupted()
         self.lab.start_workers(self.stop_event)
-        msg = "🟢 **연구실 가동**" + (f"\n🔄 중단됐던 실험 {len(recovered)}건을 이어서 진행합니다: {', '.join(recovered)}"
+        team = [m.role for m, _ in self.members]
+        msg = "🟢 **연구실 가동**" + (f" · 팀원 봇 {len(team)}명 접속 시도" if team else "") + (f"\n🔄 중단됐던 실험 {len(recovered)}건을 이어서 진행합니다: {', '.join(recovered)}"
                                     if recovered else "")
         if self.startup_note:
             msg += "\n" + self.startup_note
         await self.notifier._post(None, msg, None)
+        self._member_tasks.append(asyncio.create_task(self._learning_loop()))
 
     async def _ensure_channels(self):
-        names = [self.cfg.intake_channel, self.cfg.progress_channel, self.cfg.report_channel]
+        names = [self.cfg.intake_channel, self.cfg.perf_channel, self.cfg.test_channel, self.cfg.report_channel]
         for g in self.guilds:
             if self.cfg.discord_guild_id and g.id != self.cfg.discord_guild_id:
                 continue
@@ -212,6 +253,49 @@ class LabBot(discord.Client):
                     except discord.DiscordException:
                         log.warning("채널 #%s 가 없고 만들 권한도 없음", n)
 
+    # ---- 학습 완료 보고 (#성능고도화 전용) ----
+    async def _learning_loop(self):
+        """knowledge/learning_reports/pending 을 주기적으로 비운다. 각 보고는 그 역할의 봇 이름으로 올린다."""
+        await asyncio.sleep(20)                       # 팀원 봇 로그인 대기
+        while not self.is_closed():
+            try:
+                await self.flush_learning_reports()
+            except Exception:
+                log.exception("학습 보고 전송 오류")
+            await asyncio.sleep(60)
+
+    async def flush_learning_reports(self) -> int:
+        items = learning.pending_items()
+        if not items:
+            return 0
+        guild = next((g for g in self.guilds if not self.cfg.discord_guild_id or g.id == self.cfg.discord_guild_id), None)
+        ch = guild and discord.utils.get(guild.text_channels, name=self.cfg.perf_channel)
+        if ch is None:
+            log.warning("#%s 채널이 없어 학습 보고를 보내지 못함", self.cfg.perf_channel)
+            return 0
+        from .agents import DISPLAY_EN
+        sent = 0
+        for path, item in items:
+            role = item.get("role", "director")
+            member = self.notifier.members.get(role)
+            target, bot = ch, self
+            if member is not None and member.is_ready():
+                try:
+                    target, bot = member.get_channel(ch.id) or await member.fetch_channel(ch.id), member
+                except discord.DiscordException:
+                    target, bot = ch, self
+            f = learning.attachment(item)
+            try:
+                kw = {"file": discord.File(f)} if f else {}
+                await target.send(embed=discord.Embed.from_dict(learning.embed(item, DISPLAY_EN.get(role, role))), **kw)
+            except discord.DiscordException:
+                log.warning("%s 학습 보고 전송 실패(다음 주기에 재시도)", role)
+                continue
+            learning.mark_sent(path)
+            sent += 1
+            await asyncio.sleep(0.7)
+        return sent
+
     # ---- 일반 대화 ----
     def _is_owner(self, uid: int) -> bool:
         return uid == self.cfg.discord_owner_id
@@ -219,6 +303,10 @@ class LabBot(discord.Client):
     async def on_message(self, message: discord.Message):
         if message.author.bot or not self._is_owner(message.author.id):
             return
+        if self.registry is not None:
+            team = {u.id for u in message.mentions if u.id in self.registry.by_user}
+            if team and self.user.id not in team:     # 다른 팀원을 불렀으면 그 팀원이 답한다
+                return
         ch = message.channel
         text = (message.content or "").strip()
         if not text and not message.attachments:
@@ -233,6 +321,8 @@ class LabBot(discord.Client):
                 (ch.parent and ch.parent.name == self.cfg.intake_channel) or self.lab.ledger.find_by_thread(ch.id)):
             target, thread_id = ch, ch.id
         elif isinstance(ch, discord.DMChannel):
+            target = ch
+        elif isinstance(ch, discord.TextChannel) and ch.name == self.cfg.test_channel and self.user in message.mentions:
             target = ch
         if target is None:
             return

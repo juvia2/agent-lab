@@ -31,7 +31,7 @@ def _docker_note(cfg: Config) -> str:
     return "⚠️ 도커를 사용할 수 없습니다. `colima start` 후 실험이 재시도됩니다(코드 실행 단계에서 막힙니다)."
 
 
-ROLE_NAMES = ('director', 'linguist', 'cogsci', 'lm', 'developer', 'practitioner', 'documenter', 'tester')
+ROLE_NAMES = ('director', 'linguist', 'cogsci', 'lm', 'statistician', 'corpus', 'developer', 'practitioner', 'documenter', 'tester')
 
 
 def run_check(cfg: Config, router) -> int:
@@ -90,6 +90,30 @@ def run_check(cfg: Config, router) -> int:
             line(False, f"디스코드 봇 토큰 오류 ({type(e).__name__})", "Developer Portal 에서 토큰을 다시 발급해 .env 에 넣으세요")
     else:
         line(False, "DISCORD_TOKEN 설정", "Developer Portal → Bot → Reset Token")
+    # --- 팀원 봇 (선택: 토큰이 없는 팀원은 건너뛰고 연구실장 봇만으로도 동작) ---
+    import os
+    from .agents import DISPLAY_EN
+    from .team import MEMBER_CHANNELS, token_env
+    missing = []
+    for role in MEMBER_CHANNELS:
+        tok = os.environ.get(token_env(role), "").strip()
+        if not tok:
+            missing.append(DISPLAY_EN[role])
+            continue
+        async def _member_login(t=tok):
+            import discord
+            c = discord.Client(intents=discord.Intents.default())
+            await c.login(t)
+            await c.close()
+        try:
+            asyncio.run(_member_login())
+            line(True, f"팀원 봇 {DISPLAY_EN[role]} 토큰 유효")
+        except Exception as e:
+            line(False, f"팀원 봇 {DISPLAY_EN[role]} 토큰 오류 ({type(e).__name__})",
+                 f"Developer Portal 에서 다시 발급해 `python3 scripts/add_bot_tokens.py --all` 로 넣으세요")
+    if missing:
+        print(f"ℹ️  팀원 봇 토큰 없음({len(missing)}명, 연구실장 봇이 대신 알림): {', '.join(missing)}\n"
+              f"    → `python3 scripts/add_bot_tokens.py` 로 등록")
     if cfg.sandbox_backend == "docker":
         ready = docker_ready()
         line(ready, "도커 데몬 실행 중", "colima start --cpu 6 --memory 12 (또는 Docker Desktop 실행)")
@@ -162,9 +186,13 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
     from .bot import DiscordNotifier, LabBot
+    from .team import Registry, build_members
     notifier = DiscordNotifier(cfg)
     lab = Lab(cfg, ledger, client, notifier)
-    bot = LabBot(cfg, lab, Director(lab), notifier, stop, startup_note=_docker_note(cfg))
+    registry = Registry()
+    members = build_members(cfg, lab, registry)
+    bot = LabBot(cfg, lab, Director(lab), notifier, stop, startup_note=_docker_note(cfg),
+                 members=members, registry=registry)
     notifier.bot = bot
     try:
         bot.run(cfg.discord_token, log_handler=None)

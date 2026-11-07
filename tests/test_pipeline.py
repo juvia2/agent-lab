@@ -6,7 +6,7 @@ import pytest
 from conftest import T
 from lab.director import DIRECTOR_TOOLS, Director
 from lab.sandbox import Sandbox
-from lab.tools import Toolbox
+from lab.tools import CONSULTANTS, Toolbox
 
 RUN_PY = '''import json
 import numpy as np
@@ -67,7 +67,7 @@ def review(verdict="pass", issues=None):
 
 
 def script(*, plan=None, revise=False):
-    s = {"linguist": [memo_turn(), memo_turn()], "cogsci": [memo_turn(), memo_turn()], "lm": [memo_turn(), memo_turn()],
+    s = {**{r: [memo_turn(), memo_turn()] for r in CONSULTANTS},
          "practitioner": [plan or plan_turn(), *exec_turns()],
          "developer": [*build_turns(), *analyze_turns()],
          "documenter": [*report_turns()], "tester": [review()]}
@@ -75,7 +75,7 @@ def script(*, plan=None, revise=False):
         s["tester"] = [review("revise", [dict(severity="major", owner="developer", where="분석", problem="CI 계산 의심")]),
                        review("pass")]
         s["developer"] += [*analyze_turns()]                       # fix 라운드
-        for r in ("linguist", "cogsci", "lm"):
+        for r in CONSULTANTS:
             s[r].append(memo_turn())                               # 해석 갱신
         s["documenter"] += report_turns()
     return s
@@ -208,7 +208,8 @@ def test_restart_recovers_interrupted(make_lab):
 
 def test_consult_subset(make_lab):
     s = script()
-    s["cogsci"], s["lm"] = [], []
+    for r in CONSULTANTS:
+        s[r] = []
     s["linguist"] = [memo_turn(), memo_turn()]
     lab, _ = make_lab(s)
     exp = submit(lab, consult=["linguist"])

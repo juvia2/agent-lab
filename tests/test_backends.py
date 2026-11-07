@@ -25,7 +25,7 @@ TOOLS = [{"name": "write_file", "description": "파일 쓰기",
 
 
 def routes_all(name):
-    return {r: [(name, None)] for r in ("director", "linguist", "cogsci", "lm", "developer", "practitioner",
+    return {r: [(name, None)] for r in ("director", "linguist", "cogsci", "lm", "statistician", "corpus", "developer", "practitioner",
                                         "documenter", "tester", "default")}
 
 
@@ -329,7 +329,7 @@ def test_pipeline_runs_through_router_with_mid_run_fallback(tmp_path):
     api = AnthropicAPIBackend(scripted, "m")
     flaky = Flaky(AnthropicAPIBackend(scripted, "m"), fail_after=5)
     routes = {r: [("claude", None), ("api", None)] for r in
-              ("director", "linguist", "cogsci", "lm", "developer", "practitioner", "documenter", "tester")}
+              ("director", "linguist", "cogsci", "lm", "statistician", "corpus", "developer", "practitioner", "documenter", "tester")}
     lab, router = make_routed_lab(tmp_path, scripted, routes, {"claude": flaky, "api": api})
     exp = submit(lab)
     lab.process_one()
@@ -342,7 +342,7 @@ def test_pipeline_runs_through_router_with_mid_run_fallback(tmp_path):
 def test_no_backend_pauses_experiment_and_resume_keeps_budget(tmp_path):
     dead = Fake("claude", BackendUnavailable("로그인 필요", 7200))
     routes = {r: [("claude", None)] for r in
-              ("director", "linguist", "cogsci", "lm", "developer", "practitioner", "documenter", "tester", "default")}
+              ("director", "linguist", "cogsci", "lm", "statistician", "corpus", "developer", "practitioner", "documenter", "tester", "default")}
     lab, router = make_routed_lab(tmp_path, None, routes, {"claude": dead})
     notifier_msgs = []
     lab.notifier.post = lambda exp, text, files=None: notifier_msgs.append(text)

@@ -48,7 +48,8 @@ class Sandbox:
             env = None
             cwd = None
         else:
-            argv = ["bash", "-lc", command]
+            # 로그인 셸은 PATH 를 재설정해 host-venv 와 호출자의 가상환경을 무시한다.
+            argv = ["bash", "-c", command]
             env = dict(os.environ, HF_HOME=str(self.cfg.hf_cache_dir), PYTHONUNBUFFERED="1",
                        TOKENIZERS_PARALLELISM="false", LAB_DATA=str(self.cfg.data_dir))
             venv_bin = self.cfg.lab_home / "host-venv" / "bin"
