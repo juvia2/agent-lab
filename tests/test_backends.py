@@ -11,12 +11,13 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import ScriptedClient
-from lab.backends import (AnthropicAPIBackend, Backend, BackendError, BackendUnavailable, CLIBackend,
+from lab.backends import (AnthropicAPIBackend, Backend, BackendError, BackendUnavailable, CLIBackend, HermesBackend,
                           OpenAICompatBackend, Router, parse_reply, parse_route, render_transcript, tool_protocol)
 from lab.config import Config
 from lab.ledger import Ledger
 from lab.llm import NoBackend, run_agent, ToolOutput
 from lab.notify import ConsoleNotifier
+from lab.policy import DataPolicy
 from lab.pipeline import Lab
 from test_pipeline import script, submit
 
@@ -27,6 +28,45 @@ TOOLS = [{"name": "write_file", "description": "파일 쓰기",
 def routes_all(name):
     return {r: [(name, None)] for r in ("director", "linguist", "cogsci", "lm", "statistician", "corpus", "developer", "practitioner",
                                         "documenter", "tester", "default")}
+
+
+def test_hermes_backend_uses_restricted_toolsets_and_lab_protocol(monkeypatch, tmp_path):
+    backend = HermesBackend("/fake/hermes", "research-lab-coordinator", "openai-codex", 30)
+    monkeypatch.setattr(backend, "available", lambda: (True, ""))
+    monkeypatch.setenv("DISCORD_TOKEN", "must-not-reach-hermes")
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(cmd=cmd, **kw)
+        reply = '<tool_call>{"name":"write_file","input":{"path":"notes/a.md","content":"ok"}}</tool_call>'
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"type": "result", "exit_code": 0,
+                              "text": reply, "tokens": {"input": 12, "output": 8}}), stderr="")
+
+    monkeypatch.setattr("lab.backends.subprocess.run", fake_run)
+    response = backend.complete(system="[ROLE:practitioner]", messages=[{"role": "user", "content": "계획"}],
+                                tools=TOOLS, model=None, max_tokens=100)
+    assert response.content[0].name == "write_file" and response.usage.input_tokens == 12
+    assert seen["cmd"][seen["cmd"].index("--toolsets") + 1] == "memory,skills"
+    assert "DISCORD_TOKEN" not in seen["env"]
+    assert "write_file" in seen["input"] and "[ROLE:practitioner]" in seen["input"]
+
+
+def test_hermes_backend_requires_explicit_provider():
+    backend = HermesBackend("/fake/hermes", "research-lab-coordinator", "", 30)
+    ok, why = backend.available()
+    assert not ok and ("CLI" in why or "HERMES_PROVIDER" in why)
+
+
+def test_hermes_route_cannot_fallback_or_run_other_roles(monkeypatch):
+    from lab.config import load_routes
+    monkeypatch.setenv("ROUTE_PRACTITIONER", "hermes, codex")
+    with pytest.raises(ValueError, match="단독 경로"):
+        load_routes()
+    monkeypatch.setenv("ROUTE_PRACTITIONER", "hermes")
+    assert load_routes()["practitioner"] == [("hermes", None)]
+    monkeypatch.setenv("ROUTE_DIRECTOR", "hermes")
+    with pytest.raises(ValueError, match="ROUTE_PRACTITIONER"):
+        load_routes()
 
 
 # ------------------------------------------------------------ 규약 파싱
@@ -254,7 +294,8 @@ def mk_router(routes, **backs):
 
 
 def call(r, role="tester"):
-    return r.create(system=f"[ROLE:{role}] x", messages=[{"role": "user", "content": "a"}], tools=[])
+    return r.create(system=f"[ROLE:{role}] x", messages=[{"role": "user", "content": "a"}], tools=[],
+                    data_policy=DataPolicy("public", frozenset({"claude", "codex", "gemini", "api"})))
 
 
 def test_router_falls_back_and_remembers_cooldown():
@@ -310,6 +351,13 @@ def make_routed_lab(tmp_path, scripted, routes, backends):
     return Lab(cfg, Ledger(cfg.ledger_path), router, ConsoleNotifier()), router
 
 
+def allow_routed_test(lab, exp):
+    path = lab.cfg.lab_home / "policies" / f"{exp['id']}.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({"classification": "public", "external_backends": ["claude", "api"],
+                                "discord_publish": False}), encoding="utf-8")
+
+
 def test_pipeline_runs_through_router_with_mid_run_fallback(tmp_path):
     """claude 가 중간에 한도 소진으로 막혀도 다음 백엔드가 이어받아 실험이 끝난다."""
     scripted = ScriptedClient(script())
@@ -332,6 +380,10 @@ def test_pipeline_runs_through_router_with_mid_run_fallback(tmp_path):
               ("director", "linguist", "cogsci", "lm", "statistician", "corpus", "developer", "practitioner", "documenter", "tester")}
     lab, router = make_routed_lab(tmp_path, scripted, routes, {"claude": flaky, "api": api})
     exp = submit(lab)
+    allow_routed_test(lab, exp)
+    lab.process_one()
+    assert lab.ledger.get(exp["id"])["status"] == "awaiting_approval"
+    lab.approve(exp["id"])
     lab.process_one()
     e = lab.ledger.get(exp["id"])
     assert e["status"] == "done", e["error"]
@@ -347,6 +399,7 @@ def test_no_backend_pauses_experiment_and_resume_keeps_budget(tmp_path):
     notifier_msgs = []
     lab.notifier.post = lambda exp, text, files=None: notifier_msgs.append(text)
     exp = submit(lab)
+    allow_routed_test(lab, exp)
     lab.process_one()
     e = lab.ledger.get(exp["id"])
     assert e["status"] == "paused" and "로그인 필요" in e["error"]
@@ -355,3 +408,38 @@ def test_no_backend_pauses_experiment_and_resume_keeps_budget(tmp_path):
     assert "재개" in lab.resume(exp["id"])
     assert lab.ledger.get(exp["id"])["token_budget"] == budget       # 백엔드 문제로 멈춘 것은 예산을 늘리지 않는다
     assert router._cooling("claude") is None                          # 재개하면 쿨다운도 풀린다
+
+
+# ------------------------------------------------------------ CLI 도구 규약 회귀 (워밍업 07·10 실패)
+def test_tool_protocol_uses_lab_tag_hermes_does_not_swallow():
+    """Hermes 런타임은 <tool_call> 을 자기 문법으로 가로채 최종 text 에서 지운다. 연구실 규약은 다른 태그를 쓴다."""
+    proto = tool_protocol(TOOLS)
+    assert "<lab_call>" in proto and "<tool_call>" not in proto
+    assert "내장 함수 목록" in proto and "읽기 전용" in proto       # codex 가 '도구 없음/읽기 전용'으로 포기하지 않게
+    shown = render_transcript([{"role": "user", "content": "a"},
+                               {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "x", "input": {}}]}])
+    assert "<lab_call>" in shown and "<tool_call>" not in shown
+    blocks = parse_reply('읽겠다\n<lab_call>{"name": "read_file", "input": {"path": "a"}}</lab_call>')
+    assert blocks[1]["type"] == "tool_use" and blocks[1]["name"] == "read_file"
+
+
+def test_codex_cli_disables_builtin_shell(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        Path(cmd[cmd.index("-o") + 1]).write_text("완료", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("lab.backends.subprocess.run", fake_run)
+    CLIBackend("codex", "codex", 30).complete(system="[ROLE:developer]", messages=[{"role": "user", "content": "a"}],
+                                              tools=TOOLS, model=None, max_tokens=10)
+    disabled = {seen["cmd"][i + 1] for i, a in enumerate(seen["cmd"]) if a == "--disable"}
+    assert {"shell_tool", "unified_exec"} <= disabled
+
+
+def test_parse_reply_accepts_unclosed_call_with_complete_json():
+    """codex 가 닫는 태그 대신 깨진 토큰을 내고 끝난 실제 사례(워밍업 07 재시험 1/4)."""
+    blocks = parse_reply('<lab_call>{"name":"read_file","input":{"path":"inputs/a.py"}}】【：】【“】【')
+    assert [b["type"] for b in blocks] == ["tool_use"] and blocks[0]["input"] == {"path": "inputs/a.py"}
+    assert parse_reply("<lab_call>{\"name\": ")[0]["name"] == "_parse_error"

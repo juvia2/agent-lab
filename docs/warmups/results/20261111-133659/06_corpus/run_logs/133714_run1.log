@@ -1,0 +1,60 @@
+$ mkdir -p notes && cat > notes/check_stimuli.py <<'EOF'
+import csv, math, random, statistics as st, collections
+rows=list(csv.DictReader(open('inputs/stimuli.csv',encoding='utf-8')))
+print('n rows',len(rows))
+print('cond counts',collections.Counter(r['condition'] for r in rows))
+ids=collections.Counter(r['target'] for r in rows)
+print('duplicate target IDs:',[(k,v) for k,v in ids.items() if v>1])
+for r in rows:
+    exp=('T%03d%s'%(int(r['item']),r['condition'].lower()))
+    if r['target']!=exp: print('ID mismatch',r['item'],r['condition'],r['target'],'expected',exp)
+print('missing:',[(r['item'],r['condition'],k) for r in rows for k in ('log_freq','n_syll','n_subword') if r[k]==''])
+print('subword>syll:',[(r['item'],r['condition']) for r in rows if r['n_subword'] and int(r['n_subword'])>int(r['n_syll'])])
+by={}
+for r in rows:
+    for k in ('log_freq','n_syll','n_subword'):
+        if r[k]!='': by.setdefault((r['condition'],k),{})[int(r['item'])]=float(r[k])
+random.seed(1)
+for k in ('log_freq','n_syll','n_subword'):
+    a=by[('A',k)];b=by[('B',k)]
+    va=list(a.values());vb=list(b.values())
+    print(f'\n{k}: A mean={st.mean(va):.3f} sd={st.stdev(va):.3f} n={len(va)} range={min(va)}-{max(va)} | B mean={st.mean(vb):.3f} sd={st.stdev(vb):.3f} n={len(vb)} range={min(vb)}-{max(vb)}')
+    common=sorted(set(a)&set(b))
+    d=[b[i]-a[i] for i in common]
+    m=st.mean(d);sd=st.stdev(d);n=len(d)
+    t=m/(sd/math.sqrt(n))
+    bs=sorted(st.mean(random.choices(d,k=n)) for _ in range(5000))
+    pooled=math.sqrt((st.variance(va)+st.variance(vb))/2)
+    print(f'  paired B-A n={n} mean diff={m:.3f} sd_d={sd:.3f} t={t:.2f} boot95CI=[{bs[125]:.3f},{bs[4874]:.3f}] d_pooled={m/pooled:.2f}')
+    try:
+        from scipy import stats
+        print('  paired p=%.4g'%stats.ttest_rel([b[i] for i in common],[a[i] for i in common]).pvalue)
+    except Exception as e: print('  scipy n/a')
+print('\nsyll distribution',{c:sorted(collections.Counter(int(r['n_syll']) for r in rows if r['condition']==c).items()) for c in 'AB'})
+print('subword distribution',{c:sorted(collections.Counter(int(r['n_subword']) for r in rows if r['condition']==c).items()) for c in 'AB'})
+EOF
+python3 -I notes/check_stimuli.py | tee notes/check_stimuli_output.txt
+[exit 0] 1.8s
+
+n rows 80
+cond counts Counter({'A': 40, 'B': 40})
+duplicate target IDs: [('T007a', 2), ('T012a', 2)]
+ID mismatch 7 B T007a expected T007b
+ID mismatch 23 B T012a expected T023b
+missing: [('31', 'A', 'log_freq')]
+subword>syll: []
+
+log_freq: A mean=3.287 sd=0.453 n=39 range=2.26-4.36 | B mean=3.293 sd=0.512 n=40 range=2.46-4.57
+  paired B-A n=39 mean diff=0.015 sd_d=0.665 t=0.14 boot95CI=[-0.192,0.220] d_pooled=0.03
+  paired p=0.8878
+
+n_syll: A mean=2.525 sd=0.640 n=40 range=2.0-4.0 | B mean=3.475 sd=0.987 n=40 range=2.0-5.0
+  paired B-A n=40 mean diff=0.950 sd_d=1.176 t=5.11 boot95CI=[0.575,1.325] d_pooled=1.14
+  paired p=8.823e-06
+
+n_subword: A mean=2.100 sd=0.810 n=40 range=1.0-4.0 | B mean=3.050 sd=1.085 n=40 range=1.0-5.0
+  paired B-A n=40 mean diff=0.950 sd_d=1.154 t=5.21 boot95CI=[0.600,1.300] d_pooled=0.99
+  paired p=6.476e-06
+
+syll distribution {'A': [(2, 22), (3, 15), (4, 3)], 'B': [(2, 7), (3, 14), (4, 12), (5, 7)]}
+subword distribution {'A': [(1, 8), (2, 23), (3, 6), (4, 3)], 'B': [(1, 3), (2, 10), (3, 12), (4, 12), (5, 3)]}

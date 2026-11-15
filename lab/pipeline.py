@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import shutil
 import subprocess
@@ -17,6 +18,8 @@ from .ledger import PHASE_STATUS, Ledger
 from .llm import BudgetExceeded, NoBackend, Stopped, run_agent
 from .notebook import Notebook
 from .notify import Notifier
+from .policy import load_policy
+from .protocol import check_protocol, sha256, write_protocol
 from .sandbox import Sandbox
 from .tools import CONSULTANTS, ROLE_TOOLS, Toolbox, tool_schemas
 
@@ -117,9 +120,31 @@ class Lab:
         exp = self.ledger.get(exp_id)
         if not exp or exp["status"] != "awaiting_approval":
             return f"{exp_id}: 승인 대기 상태가 아닙니다."
+        meta = self._meta(exp["id"])
+        change = meta.pop("pending_change", None)
+        if change and "run_commands" in change:
+            try:
+                write_protocol(self.cfg.experiments_dir / exp["id"], change["run_commands"])
+            except ValueError as error:
+                return f"{exp_id}: 변경 실행 명세 오류: {error}"
+        if change:
+            d = self.cfg.experiments_dir / exp["id"] / "notes"
+            n = len(list(d.glob("approved_change_*.md"))) + 1
+            (d / f"approved_change_{n}.md").write_text(
+                "# 연구자 승인 변경\n\n" + "\n".join(f"- {k}: {change[k]}" for k in
+                ("current", "proposed", "reason", "impact")) +
+                (f"- run_commands: {change['run_commands']}\n" if "run_commands" in change else "") + "\n",
+                encoding="utf-8")
+        if exp["phase"] == "build" or (change and "run_commands" in change):
+            try:
+                check_protocol(self.cfg.experiments_dir / exp["id"])
+            except (ValueError, KeyError, OSError) as error:
+                return f"{exp_id}: 실행 명세 오류: {error}"
+            meta["approved_protocol_sha256"] = sha256(self.cfg.experiments_dir / exp["id"] / "protocol.json")
+        self.ledger.update(exp["id"], meta_json=json.dumps(meta, ensure_ascii=False))
         self.ledger.update(exp["id"], approved=1, status="queued")
         self.ledger.add_event(exp["id"], "approved", "연구자 승인: " + (exp["approval_reasons"] or ""))
-        self.notifier.post(self.ledger.get(exp["id"]), f"🔓 {exp['id']} 승인되었습니다. 구현·실행을 시작합니다.")
+        self.notifier.post(self.ledger.get(exp["id"]), f"🔓 {exp['id']} 승인되었습니다. 작업을 이어갑니다.")
         return f"{exp['id']} 승인함."
 
     def reject(self, exp_id: str) -> str:
@@ -254,6 +279,11 @@ class Lab:
         if role is None:
             role = next((r for r in ROLE_META if text.startswith(label(r))), None)
         try:
+            from . import bus
+            bus.emit(self.cfg, "stage", exp=eid, root=eid, src=role or "director", text=text)
+        except Exception:
+            log.exception("bus emit failed")
+        try:
             self.notifier.post(self.ledger.get(eid), text, files, role=role)
         except Exception:
             log.exception("notify failed")
@@ -283,7 +313,7 @@ class Lab:
         return network, host
 
     def _gate_reasons(self, plan: dict) -> list[str]:
-        reasons = []
+        reasons = ["실험 계획 확정 (가설·데이터·조건·지표·분석법)"]
         if plan.get("needs_network") and self.cfg.network_policy == "ask":
             reasons.append("네트워크 사용 (모델·데이터 다운로드)")
         if plan.get("needs_host_accel"):
@@ -306,10 +336,13 @@ class Lab:
     def _call(self, eid: str, role: str, prompt: str, *, only: list[str] | None = None, network: bool = False,
               host: bool = False, max_tokens: int = 8192):
         tb = Toolbox(cfg=self.cfg, exp_id=eid, role=role, sandbox=self.sandbox, notebook=self.notebook,
-                     notify=self.notifier, network_allowed=network, host_allowed=host)
-        return run_agent(self.client, model=model_for(self.cfg, role), system=system_for(role), prompt=prompt,
+                     notify=self.notifier, network_allowed=network, host_allowed=host,
+                     enforce_protocol=role == "practitioner" and self.ledger.get(eid)["phase"] not in ("consult", "plan"),
+                     approved_protocol_sha256=self._meta(eid).get("approved_protocol_sha256"))
+        return run_agent(self.client, model=model_for(self.cfg, role), system=system_for(role, self.cfg), prompt=prompt,
                          tools=tool_schemas(role, only), execute=tb.execute, on_usage=self._usage_cb(eid),
-                         should_stop=self._stop_fn(eid), max_turns=self.cfg.max_agent_turns, max_tokens=max_tokens)
+                         should_stop=self._stop_fn(eid), max_turns=self.cfg.max_agent_turns, max_tokens=max_tokens,
+                         data_policy=load_policy(self.cfg, eid))
 
     def _header(self, exp: dict, stage: str) -> str:
         network, host = self._perms(exp)
@@ -383,12 +416,18 @@ class Lab:
         prompt = (self._header(exp, "plan(계획 통합)") +
                   f"\n\n자문 메모: {', '.join('notes/' + m for m in memos) or '(없음)'}\n"
                   "자문을 통합해 실험 계획을 세우고 `finish_plan`으로 제출하세요.")
-        res = self._call(eid, "practitioner", prompt, only=_only("practitioner", "finish_execution"))
+        res = self._call(eid, "practitioner", prompt, only=_only("practitioner", "finish_execution", "request_change"))
         plan = res.terminal
         if not plan:
             raise RuntimeError("실험 실무 담당이 계획을 제출하지 않고 종료함: " + _short(res.text, 300))
+        if not plan.get("run_commands"):
+            return self._fail(eid, "계획에 승인할 본 실행 명령(run_commands)이 없음")
         (d / "plan.md").write_text(plan["plan_markdown"], encoding="utf-8")
         (d / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            write_protocol(d, plan["run_commands"])
+        except ValueError as error:
+            return self._fail(eid, str(error))
         self.ledger.update(eid, plan_json=json.dumps(plan, ensure_ascii=False))
         self._say(eid, f"{label('practitioner')} 계획 확정\n{_short(plan['summary'], 900)}\n"
                        f"예상 {plan.get('est_runtime_min', '?')}분"
@@ -396,10 +435,12 @@ class Lab:
         if plan.get("needs_network") and self.cfg.network_policy == "deny":
             self._say(eid, "ℹ️ 네트워크 정책이 deny 라서 네트워크 없이 진행합니다(필요한 데이터가 없으면 실패할 수 있음).")
         reasons = self._gate_reasons(plan)
-        if reasons and not exp["approved"]:
+        if not exp["approved"]:
             self.ledger.update(eid, status="awaiting_approval", phase="build",
                                approval_reasons=json.dumps(reasons, ensure_ascii=False))
             self.ledger.add_event(eid, "approval", "승인 필요: " + "; ".join(reasons))
+            self.notifier.post(self.ledger.get(eid), "📄 승인할 계획과 실행 명세를 첨부합니다.",
+                               [d / "plan.md", d / "protocol.json"])
             self.notifier.ask_approval(self.ledger.get(eid), reasons, plan["summary"])
             return False
         self._advance(eid, "build")
@@ -409,6 +450,13 @@ class Lab:
     def _phase_build(self, exp: dict) -> bool:
         eid = exp["id"]
         d = self.cfg.experiments_dir / eid
+        approved_hash = self._meta(eid).get("approved_protocol_sha256")
+        if not approved_hash:
+            return self._fail(eid, "승인된 실행 명세가 없음")
+        try:
+            check_protocol(d, approved_hash)
+        except (ValueError, KeyError, OSError) as error:
+            return self._fail(eid, f"구현 전 실행 명세 오류: {error}")
         network, host = self._perms(exp)
         meta = self._meta(eid)
         fix_note = meta.get("fix_note")
@@ -429,8 +477,14 @@ class Lab:
         self._say(eid, f"{label('developer')} 구현 {b['status']}\n{_short(b['summary'], 700)}\n"
                        f"테스트: {_short('; '.join(b.get('tests_run', [])), 400)}"
                        + (f"\n한계: {_short('; '.join(b['known_limits']), 300)}" if b.get("known_limits") else ""))
-        if b["status"] == "failed":
-            return self._fail(eid, "구현 실패: " + b["summary"])
+        if b["status"] != "ready":
+            return self._fail(eid, "구현 미완료: " + b["summary"])
+        try:
+            commands = check_protocol(d, self._meta(eid).get("approved_protocol_sha256"))["run_commands"]
+        except (ValueError, KeyError, OSError) as error:
+            return self._fail(eid, f"구현 전 실행 명세 오류: {error}")
+        if not set(commands).issubset(set(b.get("entrypoints", []))):
+            return self._fail(eid, "구현 진입점이 승인된 실행 명령과 일치하지 않음")
         self._set_meta(eid, fix_note=None)
         self._advance(eid, "execute")
         return True
@@ -439,13 +493,46 @@ class Lab:
     def _phase_execute(self, exp: dict) -> bool:
         eid = exp["id"]
         d = self.cfg.experiments_dir / eid
+        approved_hash = self._meta(eid).get("approved_protocol_sha256")
+        if not approved_hash:
+            return self._fail(eid, "승인된 실행 명세가 없음")
+        try:
+            check_protocol(d, approved_hash)
+        except (ValueError, KeyError, OSError) as error:
+            return self._fail(eid, f"실행 명세 오류: {error}")
+        audit_path = self.cfg.lab_home / "audits" / f"{eid}.jsonl"
+        audit_before = len(audit_path.read_text(encoding="utf-8").splitlines()) if audit_path.exists() else 0
+        protected = [d / "request.md", d / "plan.md", d / "plan.json", d / "protocol.json"] + [
+            p for p in (d / "code").rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"]
+        before = {str(p.relative_to(d)): hashlib.sha256(p.read_bytes()).hexdigest() for p in protected if p.is_file()}
         network, host = self._perms(exp)
         self._say(eid, f"{label('practitioner')} 실행 시작")
         prompt = (self._header(exp, "execute(실행)") +
                   "\n\nplan.md 와 notes/build.json, code/README.md 를 읽고 구현된 코드를 실행해 결과를 만드세요. "
-                  "이전 시도의 흔적이 있으면 이어서 하세요. 끝나면 `finish_execution`.")
+                  "notes/approved_change_*.md 가 있으면 승인된 변경만 반영하세요. "
+                  "이전 시도의 흔적이 있으면 이어서 하세요. 계획이나 실행 설정을 바꿔야 한다면 변경 전에 `request_change`로 멈추세요. "
+                  "끝나면 `finish_execution`.")
         res = self._call(eid, "practitioner", prompt, only=_only("practitioner", "finish_plan"),
                          network=network, host=host)
+        after = {name: hashlib.sha256((d / name).read_bytes()).hexdigest() if (d / name).is_file() else None
+                 for name in before}
+        new_code = [p for p in (d / "code").rglob("*") if p.is_file() and "__pycache__" not in p.parts
+                    and p.suffix != ".pyc" and str(p.relative_to(d)) not in before]
+        changed = [name for name in before if before[name] != after[name]] + [str(p.relative_to(d)) for p in new_code]
+        if changed:
+            return self._fail(eid, "실무 담당 실행 중 승인된 요청·계획 또는 구현 코드가 변경됨: " + ", ".join(changed[:20]))
+        if res.terminal and "change_request" in res.terminal:
+            change = res.terminal["change_request"]
+            self._set_meta(eid, pending_change=change)
+            self.ledger.update(eid, approved=0, status="awaiting_approval", phase="execute",
+                               approval_reasons=json.dumps(["실험 설계·실행 설정 변경"], ensure_ascii=False))
+            summary = (f"현재: {change['current']}\n제안: {change['proposed']}\n"
+                       f"이유: {change['reason']}\n결과 해석 영향: {change['impact']}"
+                       + ("\n새 실행 명령: " + "; ".join(change["run_commands"])
+                          if "run_commands" in change else ""))
+            self.ledger.add_event(eid, "change_requested", summary)
+            self.notifier.ask_approval(self.ledger.get(eid), ["실험 설계·실행 설정 변경"], summary)
+            return False
         x = res.terminal or {"status": "partial", "notes": "종료 보고 없이 멈춤: " + _short(res.text, 500),
                              "result_files": []}
         (d / "notes" / "execution.json").write_text(json.dumps(x, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -458,6 +545,18 @@ class Lab:
                 self._advance(eid, "build")
                 return True
             return self._fail(eid, "실행 실패(수정 후에도): " + x["notes"])
+        if x["status"] != "success":
+            return self._fail(eid, "실행 미완료: " + x["notes"])
+        try:
+            audit = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()[audit_before:]] \
+                if audit_path.exists() else []
+            manifest = json.loads((d / "results/run_manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            return self._fail(eid, f"실행 기록 또는 manifest 없음: {error}")
+        if not any(row["exit_code"] == 0 and row["protocol_sha256"] == approved_hash for row in audit):
+            return self._fail(eid, "승인된 본 실행 명령의 성공 기록이 없음")
+        if manifest.get("protocol_sha256") != approved_hash:
+            return self._fail(eid, "run_manifest.json이 승인된 실행 명세와 일치하지 않음")
         self._advance(eid, "analyze")
         return True
 
@@ -478,8 +577,8 @@ class Lab:
         warn = "" if (d / "results" / "derived" / "analysis_summary.json").exists() else \
             "\n⚠️ results/derived/analysis_summary.json 이 없습니다."
         self._say(eid, f"{label('developer')} 전체 분석 {b['status']}\n{_short(b['summary'], 700)}{warn}")
-        if b["status"] == "failed":
-            return self._fail(eid, "전체 분석 실패: " + b["summary"])
+        if b["status"] != "ready":
+            return self._fail(eid, "전체 분석 미완료: " + b["summary"])
         self._advance(eid, "interpret")
         return True
 
@@ -566,21 +665,22 @@ class Lab:
             blocking = [i for i in issues if i.get("severity") in ("critical", "major")]
             self._say(eid, f"{label('tester')} {rnd}차 검증: **{review['verdict']}** — {_short(review.get('summary', ''), 400)}\n"
                            f"지적 {len(issues)}건 (치명·주요 {len(blocking)}건), 직접 수행한 검증 {len(review.get('checks_run', []))}건")
-            if review["verdict"] != "revise" or not blocking:
+            if review["verdict"] == "pass" and not blocking:
                 break
-            if rnd == MAX_REVIEW_ROUNDS:
+            if review["verdict"] != "revise" or not issues or rnd == MAX_REVIEW_ROUNDS:
                 break
             self._fix_round(self.ledger.get(eid), issues)
 
-        unresolved = [i for i in review.get("issues", []) if i.get("severity") in ("critical", "major")] \
-            if review.get("verdict") == "revise" else []
+        unresolved = [i for i in review.get("issues", []) if i.get("severity") in ("critical", "major")]
         self._append_review_section(d / "report" / "report.md", review, rnd, unresolved)
+        if review["verdict"] != "pass" or unresolved:
+            return self._fail(eid, f"검증 미완료: 판정 {review['verdict']}, 미해결 주요 지적 {len(unresolved)}건")
         return self._finish(eid, report, review, rnd, unresolved)
 
     @staticmethod
     def _append_review_section(path: Path, review: dict, rounds: int, unresolved: list[dict]) -> None:
         verdict = review.get("verdict")
-        head = {"pass": "통과", "revise": "미해결 지적 있음", "unverified": "검증 미완료"}.get(verdict, str(verdict))
+        head = "미해결 지적 있음" if unresolved else {"pass": "통과", "revise": "수정 필요", "unverified": "검증 미완료"}.get(verdict, str(verdict))
         lines = ["", "---", "## 검증 결과 (자동 기록)", f"- 판정: **{head}** ({rounds}차 검증)",
                  f"- 검증 요약: {review.get('summary', '')}"]
         if review.get("checks_run"):

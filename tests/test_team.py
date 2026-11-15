@@ -72,7 +72,9 @@ def test_member_reply_uses_role_route_and_read_tools(make_lab):
 
 def test_pipeline_progress_posted_as_roles(make_lab):
     lab, notifier = make_lab(script())
-    submit(lab)
+    exp = submit(lab)
+    lab.process_one()
+    lab.approve(exp["id"])
     lab.process_one()
     roles = set(r for r in notifier.roles if r)
     assert set(CONSULTANTS) <= roles                                    # 자문·해석 메모는 각 전문가 이름으로

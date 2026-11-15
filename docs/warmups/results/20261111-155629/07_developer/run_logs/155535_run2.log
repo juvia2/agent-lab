@@ -1,0 +1,5 @@
+$ SURP_DIR=fixed python -m pytest -q tests/test_surprisal_utils.py > pytest_after.log 2>&1; status=$?; cat pytest_after.log; exit $status
+[exit 0] 0.6s
+
+........                                                                 [100%]
+8 passed in 0.01s

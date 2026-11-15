@@ -1,0 +1,155 @@
+$ python3 -I review/recompute.py inputs/raw_rt.csv review/recompute_results.json
+[exit 0] 0.8s
+
+{
+ "n_rows_valid": 960,
+ "n_rows_bad_or_missing": 0,
+ "bad_rows_sample": [],
+ "n_subjects": 24,
+ "conditions": [
+  "A",
+  "B"
+ ],
+ "n_items_per_condition": {
+  "A": 20,
+  "B": 20
+ },
+ "n_duplicate_cells": 0,
+ "trials_per_subject_condition_minmax": [
+  20,
+  20
+ ],
+ "item_overlap_between_conditions": 20,
+ "rt_min_max": [
+  150.0,
+  902.0
+ ],
+ "n_rt_le_0": 0,
+ "trial_mean_by_cond": {
+  "A": 402.68125,
+  "B": 442.04375
+ },
+ "mean_of_subject_means_by_cond": {
+  "A": 402.68125,
+  "B": 442.04375
+ },
+ "paired": {
+  "n": 24,
+  "df": 23,
+  "mean_diff_B_minus_A": 39.362500000000004,
+  "sd_diff": 56.07654948526981,
+  "t": 3.438800742389827,
+  "cohens_dz": 0.7019422621632551,
+  "p_two_sided": 0.002237649310584609,
+  "t_ci95": [
+   15.683449863023771,
+   63.04155013697624
+  ]
+ },
+ "n_subjects_B_slower": 20,
+ "n_subjects_B_faster_or_equal": 4,
+ "subject_diffs": {
+  "S01": -70.15,
+  "S02": 62.2,
+  "S03": 122.7,
+  "S04": -7.15,
+  "S05": 38.15,
+  "S06": 122.1,
+  "S07": 8.85,
+  "S08": 26.05,
+  "S09": 5.9,
+  "S10": 76.3,
+  "S11": 71.7,
+  "S12": 61.2,
+  "S13": 42.25,
+  "S14": 26.75,
+  "S15": 42.6,
+  "S16": 8.6,
+  "S17": 62.95,
+  "S18": -59.5,
+  "S19": 155.75,
+  "S20": 61.7,
+  "S21": 35.75,
+  "S22": 0.75,
+  "S23": 99.8,
+  "S24": -50.55
+ },
+ "bootstrap_subject_ci95": [
+  17.312499999999996,
+  61.07916666666667
+ ],
+ "by_item": {
+  "mean_A": 402.68125000000003,
+  "mean_B": 442.04375,
+  "diff": 39.362499999999955,
+  "welch_t": 3.6395327617581694
+ },
+ "comparison": [
+  {
+   "item": "참가자 수",
+   "reported": 24,
+   "recomputed": 24,
+   "match": true
+  },
+  {
+   "item": "조건 A 문항 수",
+   "reported": 20,
+   "recomputed": 20,
+   "match": true
+  },
+  {
+   "item": "조건 B 문항 수",
+   "reported": 20,
+   "recomputed": 20,
+   "match": true
+  },
+  {
+   "item": "총 시행 수",
+   "reported": 960,
+   "recomputed": 960,
+   "match": true
+  },
+  {
+   "item": "조건 A 평균(참가자 평균의 평균)",
+   "reported": 402.7,
+   "recomputed": 402.681,
+   "match": true
+  },
+  {
+   "item": "조건 B 평균(참가자 평균의 평균)",
+   "reported": 460.0,
+   "recomputed": 442.044,
+   "match": false
+  },
+  {
+   "item": "차이 B-A",
+   "reported": 39.4,
+   "recomputed": 39.363,
+   "match": true
+  },
+  {
+   "item": "t",
+   "reported": 3.44,
+   "recomputed": 3.439,
+   "match": true
+  },
+  {
+   "item": "df",
+   "reported": 23,
+   "recomputed": 23,
+   "match": true
+  },
+  {
+   "item": "B가 더 느린 참가자 수",
+   "reported": 24,
+   "recomputed": 20,
+   "match": false
+  },
+  {
+   "item": "보고서 내부: 460.0-402.7 vs 39.4",
+   "reported": 39.4,
+   "recomputed": 57.3,
+   "match": false
+  }
+ ]
+}

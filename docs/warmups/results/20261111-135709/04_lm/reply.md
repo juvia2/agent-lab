@@ -1,0 +1,109 @@
+# CPU에서 1억·3억·8억 모델 surprisal 추출: 소요 시간·메모리 추정과 5분 벤치마크
+
+아래 수치는 이론식으로 계산한 **추정치**입니다. 실측은 하지 않았습니다. 맥 칩 사양을 모르기 때문에 범위가 넓습니다. 아래 벤치마크로 좁혀 주세요.
+
+## 1. 추정 근거
+- 총 토큰 수는 1,000문장 × 20토큰 ≈ 2만 토큰입니다. 문장마다 BOS 토큰 1개를 더합니다.
+- 순전파 연산량은 토큰당 약 2N FLOPs입니다(N = 파라미터 수).
+- CPU 실효 처리량은 약 50–300 GFLOPS로 가정했습니다. PyTorch fp32, Accelerate 사용 기준입니다.
+  - 짧은 문장을 1개씩 넣으면 낮은 쪽에 가깝습니다.
+  - 배치 16–32로 넣으면 높은 쪽에 가깝습니다.
+- 메모리
+  - 가중치: fp32 기준 파라미터당 4바이트
+  - 로짓: 배치 × 길이 × 어휘 수 × 4바이트. log_softmax까지 하면 약 2배
+  - PyTorch 기본 오버헤드: 약 0.5GB
+
+## 2. 모델별 추정
+
+| 규모 | 총 연산 | 순전파 시간 (배치 시 / 1개씩) | 로드 시간 | 가중치 (fp32) | 최대 RSS (예상) |
+|---|---|---|---|---|---|
+| ~1억 (예: GPT-2 124M) | ~5×10¹² | ~20초 / ~1.5분 | 5–15초 | ~0.5GB | ~1–1.5GB |
+| ~3억 (예: GPT-2 355M) | ~1.4×10¹³ | ~1분 / ~5분 | 10–30초 | ~1.4GB | ~2–3GB |
+| ~8억 (예: GPT-2 774M) | ~3×10¹³ | ~2.5분 / ~10분 | 20–60초 | ~3.1GB | ~4.5–7GB |
+
+- 세 모델 모두 배치 처리를 하면 각 10분 이내로 끝날 것으로 봅니다. 1억과 3억은 여유가 있습니다.
+- 어휘 수가 큰 모델(예: 25만 어휘)은 로짓 메모리가 수백 MB 늘어납니다.
+  - 배치를 8–16으로 줄이거나, 정답 토큰의 logprob만 뽑으면 됩니다.
+- 8억 모델은 로드할 때 일시적으로 가중치의 약 2배가 필요할 수 있습니다. `low_cpu_mem_usage=True`를 권장합니다.
+- 샌드박스(Docker)에서 돌린다면 Docker VM의 메모리·코어 상한이 병목이 될 수 있습니다. 8GB 상한이면 8억 모델은 빠듯합니다.
+- bf16은 맥 CPU에서 오히려 느린 경우가 많습니다. 수치 오차도 surprisal에 섞이므로 fp32를 권장합니다.
+
+## 3. 모델 쪽 주의점 (설계에 영향)
+- **같은 계열 사용 권장.** GPT-2 small/medium/large는 1억·3억·8억에 거의 정확히 대응하고 토크나이저도 같습니다. 계열이 섞이면 토큰화 차이가 크기 효과와 교란됩니다.
+- **"평균 20토큰"은 토크나이저마다 다릅니다.** 특히 한국어는 GPT-2 계열에서 바이트 단위로 쪼개져 토큰 수가 몇 배로 늘 수 있습니다. 그러면 위 시간도 비례해서 늘어납니다. 벤치마크에서 모델별 실제 평균 토큰 수를 기록하세요.
+- **첫 토큰 처리.** BOS를 앞에 붙여야 첫 토큰의 surprisal이 정의됩니다. 단위(bit/nat)도 고정하세요.
+- **패딩 정확성.** 배치 처리 결과가 1개씩 처리한 결과와 같은지 반드시 확인하세요. 오른쪽 패딩과 attention mask를 함께 써야 합니다.
+
+## 4. 5분 벤치마크 절차 (모델당 약 1–2분, 세 모델 합계 약 5분)
+1. 실제 자극에서 앞 64문장을 `sample.txt`로 저장합니다(한 줄에 한 문장).
+2. 스레드 수를 고정하고 기록합니다. 예: `torch.set_num_threads(성능코어 수)`. 다른 앱은 닫습니다.
+3. 모델마다 아래 스크립트를 실행합니다.
+   - 측정 항목: 로드 시간, 로드 후 RSS, 웜업 1배치 뒤 처리 속도(bs=1과 bs=16의 토큰/초), 최대 RSS
+4. 정확성 점검 두 가지
+   - bs=1과 bs=16의 surprisal 최대 차이: 1e-4 bit 이하여야 정상
+   - 같은 입력 2회 실행의 차이: 결정성 확인
+5. 외삽: `예상 시간 = 로드 시간 + (1000 × 실제 평균 토큰 수) / 토큰/초`. 결과 JSON과 라이브러리 버전을 남깁니다.
+
+```python
+# bench_surprisal.py  사용: python bench_surprisal.py <model_id> sample.txt [threads]
+import sys, time, json, resource, platform, torch, transformers
+from transformers import AutoTokenizer, AutoModelForCausalLM
+name, path = sys.argv[1], sys.argv[2]
+if len(sys.argv) > 3: torch.set_num_threads(int(sys.argv[3]))
+torch.manual_seed(0)
+sents = [l.strip() for l in open(path, encoding="utf-8") if l.strip()][:64]
+def peak_gb():
+    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return r / 1e9 if platform.system() == "Darwin" else r / 1e6  # mac=bytes, linux=KB
+t0 = time.perf_counter()
+tok = AutoTokenizer.from_pretrained(name)
+model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float32, low_cpu_mem_usage=True).eval()
+t_load, rss_load = time.perf_counter() - t0, peak_gb()
+pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+bos = tok.bos_token_id if tok.bos_token_id is not None else tok.eos_token_id
+
+def surprisal(batch):
+    enc = [[bos] + tok(s, add_special_tokens=False)["input_ids"] for s in batch]
+    L = max(map(len, enc))
+    ids = torch.full((len(enc), L), pad); mask = torch.zeros_like(ids)
+    for i, e in enumerate(enc):
+        ids[i, :len(e)] = torch.tensor(e); mask[i, :len(e)] = 1   # 오른쪽 패딩
+    with torch.inference_mode():
+        logits = model(input_ids=ids, attention_mask=mask).logits[:, :-1].float()
+        lp = torch.log_softmax(logits, -1).gather(-1, ids[:, 1:, None]).squeeze(-1)
+    s = -lp / torch.log(torch.tensor(2.0))                       # bits
+    return [s[i, :len(e) - 1].tolist() for i, e in enumerate(enc)], sum(len(e) - 1 for e in enc)
+
+def timed(bs, data):
+    n_tok, t = 0, time.perf_counter()
+    for i in range(0, len(data), bs):
+        n_tok += surprisal(data[i:i + bs])[1]
+    return n_tok / (time.perf_counter() - t), n_tok
+
+surprisal(sents[:4])                                            # 웜업
+tps_bs1, _ = timed(1, sents[:16])
+tps_bs16, n_tok = timed(16, sents[16:64])
+a, _ = surprisal(sents[:8]); b = [surprisal([s])[0][0] for s in sents[:8]]
+c, _ = surprisal(sents[:8])
+maxdiff = lambda x, y: max(abs(p - q) for u, v in zip(x, y) for p, q in zip(u, v))
+mean_tok = n_tok / len(sents[16:64])
+out = dict(model=name, threads=torch.get_num_threads(), torch=torch.__version__,
+           transformers=transformers.__version__, load_s=round(t_load, 1),
+           rss_after_load_gb=round(rss_load, 2), peak_rss_gb=round(peak_gb(), 2),
+           mean_tokens_per_sent=round(mean_tok, 1), tok_per_s_bs1=round(tps_bs1, 1),
+           tok_per_s_bs16=round(tps_bs16, 1),
+           est_total_min_bs16=round((t_load + 1000 * mean_tok / tps_bs16) / 60, 1),
+           batch_vs_single_maxdiff_bits=maxdiff(a, b), rerun_maxdiff_bits=maxdiff(a, c))
+print(json.dumps(out, ensure_ascii=False))
+```
+
+## 5. 실행 위치 관련
+- 샌드박스는 네트워크가 없어서 모델이 캐시에 없으면 실행할 수 없습니다. 캐시에 있는지는 확인하지 않았습니다.
+- 맥 호스트에서 직접 실행하는 것과 모델 다운로드는 연구자 승인 사항입니다.
+- 정식 추출로 진행하려면 #실험진행에 아래 초안으로 올려 주세요.
+
+> 요청서 초안
+> - 목적: 크기만 다른 같은 계열 자기회귀 모델 3종(예: GPT-2 124M/355M/774M)으로 자극 1,000문장의 토큰별 surprisal(bit) 추출
+> - 자원: 모델 다운로드(네트워크) 승인 필요. CPU fp32, 모델당 10분 이내 예상
+> - 절차: 위 5분 벤치마크로 시간·메모리·패딩 정확성을 먼저 확인한 뒤 전체 실행
+> - 기록: 모델 리비전 해시, 토크나이저별 평균 토큰 수, 라이브러리 버전, run_manifest.json

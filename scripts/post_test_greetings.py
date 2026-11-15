@@ -9,6 +9,9 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from lab.config import Config
+from lab.policy import load_policy
 API = "https://discord.com/api/v10"
 MARKER = "[접속 점검 인사]"
 
@@ -53,6 +56,9 @@ GREETINGS = [
 
 
 def main() -> int:
+    if not load_policy(Config.from_env(), "INTAKE").allows_discord:
+        print("디스코드 게시가 자료 정책상 차단됐습니다.", file=sys.stderr)
+        return 1
     values = env_values()
     guild_id = values.get("DISCORD_GUILD_ID")
     director_token = values.get("DISCORD_TOKEN")

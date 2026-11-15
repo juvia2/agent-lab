@@ -8,9 +8,9 @@ def test_every_role_has_digest():
         assert len(d) <= agents.DIGEST_LIMIT + 200, role
 
 
-def test_digest_in_system_prompts():
-    assert "최근 문헌 학습 요약" in agents.system_for("linguist")
-    assert "최근 문헌 학습 요약" in agents.director_system(None)
+def test_digest_is_not_injected_into_research_prompts():
+    assert "최근 문헌 학습 요약" not in agents.system_for("linguist")
+    assert "최근 문헌 학습 요약" not in agents.director_system(None)
 
 
 def test_missing_file_returns_empty():

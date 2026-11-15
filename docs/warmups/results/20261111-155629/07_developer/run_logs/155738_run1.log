@@ -1,0 +1,45 @@
+$ SURPRISAL_MODULE=inputs/surprisal_utils.py pytest -q test_surprisal_utils.py > pytest_before.log 2>&1; before_status=$?; pytest -q test_surprisal_utils.py > pytest_after.log 2>&1; after_status=$?; cat pytest_before.log pytest_after.log; test "$before_status" -ne 0 && test "$after_status" -eq 0
+[exit 0] 0.7s
+
+FFF..                                                                    [100%]
+=================================== FAILURES ===================================
+________ test_subword_surprisal_is_summed_per_word_including_final_word ________
+
+    def test_subword_surprisal_is_summed_per_word_including_final_word():
+        logprobs = [-math.log(2), -math.log(4), -math.log(8)]
+>       assert surprisal.word_surprisal(logprobs, [0, 0, 1]) == pytest.approx([3.0, 3.0])
+E       assert [3.0] == approx([3.0 ±....0 ± 3.0e-06])
+E         
+E         Impossible to compare lists with different sizes.
+E         Lengths: 2 and 1
+
+test_surprisal_utils.py:18: AssertionError
+_________________________ test_single_word_is_returned _________________________
+
+    def test_single_word_is_returned():
+>       assert surprisal.word_surprisal([-math.log(2)], [0]) == pytest.approx([1.0])
+E       assert [] == approx([1.0 ± 1.0e-06])
+E         
+E         Impossible to compare lists with different sizes.
+E         Lengths: 1 and 0
+
+test_surprisal_utils.py:22: AssertionError
+___________________________ test_mean_is_over_words ____________________________
+
+    def test_mean_is_over_words():
+        logprobs = [-math.log(2), -math.log(4), -math.log(16)]
+>       assert surprisal.mean_surprisal(logprobs, [0, 0, 1]) == pytest.approx(3.5)
+E       assert 3.0 == 3.5 ± 3.5e-06
+E         
+E         comparison failed
+E         Obtained: 3.0
+E         Expected: 3.5 ± 3.5e-06
+
+test_surprisal_utils.py:27: AssertionError
+=========================== short test summary info ============================
+FAILED test_surprisal_utils.py::test_subword_surprisal_is_summed_per_word_including_final_word
+FAILED test_surprisal_utils.py::test_single_word_is_returned - assert [] == a...
+FAILED test_surprisal_utils.py::test_mean_is_over_words - assert 3.0 == 3.5 ±...
+3 failed, 2 passed in 0.02s
+.....                                                                    [100%]
+5 passed in 0.01s

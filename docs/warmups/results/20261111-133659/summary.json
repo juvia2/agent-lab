@@ -1,0 +1,66 @@
+{
+  "started": "2026-11-11 13:36:59",
+  "path": "run_warmups.py (디스코드 미경유, #의뢰와 같은 프롬프트·도구·모델 경로)",
+  "sandbox_backend": "docker",
+  "docker_ready": true,
+  "items": {
+    "06": {
+      "role": "corpus",
+      "status": "responded",
+      "turns": 3,
+      "runs": 1,
+      "tools": [
+        "read_file",
+        "run_command"
+      ],
+      "attached": [],
+      "learned": [],
+      "work_dir": "/Users/ju/research-lab/workspace/adhoc/2026-11-11/corpus",
+      "seconds": 42.4,
+      "usage_so_far": "claude: 3회·21,332토큰"
+    },
+    "07": {
+      "role": "developer",
+      "status": "responded",
+      "turns": 1,
+      "runs": 0,
+      "tools": [],
+      "attached": [],
+      "learned": [],
+      "work_dir": "/Users/ju/research-lab/workspace/adhoc/2026-11-11/developer",
+      "seconds": 17.3,
+      "usage_so_far": "claude: 3회·21,332토큰 / codex: 1회·55,065토큰"
+    },
+    "09": {
+      "role": "tester",
+      "status": "responded",
+      "turns": 4,
+      "runs": 2,
+      "tools": [
+        "read_file",
+        "run_command",
+        "write_file",
+        "run_command",
+        "write_file",
+        "attach_file",
+        "attach_file",
+        "attach_file"
+      ],
+      "attached": [
+        "verification.md",
+        "recompute.py",
+        "recompute_results.json"
+      ],
+      "learned": [],
+      "work_dir": "/Users/ju/research-lab/workspace/adhoc/2026-11-11/tester",
+      "seconds": 66.1,
+      "usage_so_far": "claude: 7회·53,407토큰 / codex: 1회·55,065토큰"
+    }
+  },
+  "finished": "2026-11-11 13:39:05",
+  "grading": {
+    "06": "합격",
+    "07": "실행 실패",
+    "09": "합격"
+  }
+}

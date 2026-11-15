@@ -1,0 +1,110 @@
+[
+  {
+    "role": "user",
+    "content": "@Statistician 2×2 피험자내 설계에서 주효과 하나를 볼 거야. 참가자별 조건 평균 차이의 표준화 효과크기 dz=0.3, 양측 α=.05일 때 검정력 .80에 필요한 참가자 수를 시뮬레이션으로 구해줘.\n코드를 실제로 돌린 결과로 답하고, 가정과 시뮬레이션 반복 수를 적어줘. 스크립트도 첨부해줘."
+  },
+  {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "스크립트를 작성하고 샌드박스에서 실행하겠습니다."
+      },
+      {
+        "type": "tool_use",
+        "id": "tu_ce3d1e69bf63",
+        "name": "write_file",
+        "input": {
+          "path": "power_sim_dz03.py",
+          "content": "\"\"\"2x2 피험자내 설계, 주효과 A 하나에 대한 검정력 시뮬레이션.\n\n가정\n- 주효과 A 검정 = 참가자별 [mean(A1B1, A1B2) - mean(A2B1, A2B2)] 차이점수의 일표본 t 검정\n  (= 대응 t 검정 = 2x2 RM-ANOVA 의 A 주효과 F(1, N-1) 와 동치, F = t^2).\n- 차이점수 ~ Normal(dz, 1)  -> 표준화 효과 dz = mean(diff)/sd(diff) = 0.3.\n- 양측 alpha = .05, 목표 검정력 .80.\n- 검산 1: 비중심 t 분포 해석해.\n- 검산 2: 4개 셀 수준 생성(복합대칭, 셀 SD=1, 셀 간 상관 rho)에서 A 주효과를 계산.\n  Var(diff) = 1 - rho 이므로 평균 이동 = dz * sqrt(1 - rho) 로 두면 dz 가 동일하다.\n  B 주효과·AxB 상호작용은 0 으로 둔다(A 검정에는 영향 없음).\n\"\"\"\nimport sys\nimport numpy as np\nimport pandas as pd\nfrom scipy import stats\n\nSEED = 20261111\nDZ = 0.3\nALPHA = 0.05\nTARGET = 0.80\nNSIM = 20000          # 각 N 당 반복 수\nN_GRID = range(70, 111)\nRHO_CHECK = [0.3, 0.5, 0.7]\nNSIM_CHECK = 20000\n\nrng = np.random.default_rng(SEED)\n\n\ndef sim_power_diff(n, nsim):\n    d = rng.normal(DZ, 1.0, size=(nsim, n))\n    t = d.mean(1) / (d.std(1, ddof=1) / np.sqrt(n))\n    p = 2 * stats.t.sf(np.abs(t), df=n - 1)\n    return (p < ALPHA).mean()\n\n\ndef analytic_power(n):\n    df = n - 1\n    nc = DZ * np.sqrt(n)\n    tc = stats.t.ppf(1 - ALPHA / 2, df)\n    return stats.nct.sf(tc, df, nc) + stats.nct.cdf(-tc, df, nc)\n\n\ndef sim_power_cells(n, nsim, rho):\n    cov = np.full((4, 4), rho) + np.eye(4) * (1 - rho)\n    shift = DZ * np.sqrt(1 - rho)\n    mu = np.array([shift / 2, shift / 2, -shift / 2, -shift / 2])  # A1B1 A1B2 A2B1 A2B2\n    y = rng.multivariate_normal(mu, cov, size=(nsim, n))\n    diff = y[..., :2].mean(-1) - y[..., 2:].mean(-1)\n    t = diff.mean(1) / (diff.std(1, ddof=1) / np.sqrt(n))\n    p = 2 * stats.t.sf(np.abs(t), df=n - 1)\n    return (p < ALPHA).mean()\n\n\nrows = []\nfor n in N_GRID:\n    pw = sim_power_diff(n, NSIM)\n    se = np.sqrt(pw * (1 - pw) / NSIM)\n    rows.append(dict(N=n, power_sim=pw, mc_se=se,\n                     ci95_lo=pw - 1.96 * se, ci95_hi=pw + 1.96 * se,\n                     power_analytic=analytic_power(n)))\ndf = pd.DataFrame(rows)\ndf.to_csv(\"power_curve_dz03.csv\", index=False)\n\nn_sim = int(df.loc[df.power_sim >= TARGET, \"N\"].min())\nn_ana = int(df.loc[df.power_analytic >= TARGET, \"N\"].min())\n# 몬테카를로 오차를 고려한 보수적 기준: 95% CI 하한이 .80 이상이 되는 최소 N\nn_cons = df.loc[df.ci95_lo >= TARGET, \"N\"]\nn_cons = int(n_cons.min()) if len(n_cons) else None\n\nprint(f\"python {sys.version.split()[0]}, numpy {np.__version__}, scipy {stats.__name__ and __import__('scipy').__version__}, pandas {pd.__version__}\")\nprint(f\"seed={SEED}, nsim/N={NSIM}, dz={DZ}, alpha={ALPHA} (two-sided)\")\nprint(df.to_string(index=False, float_format=lambda x: f\"{x:.4f}\"))\nprint(f\"\\n[결과] 시뮬레이션 검정력 >= .80 최소 N = {n_sim}\")\nprint(f\"[결과] 해석해(비중심 t) >= .80 최소 N = {n_ana}\")\nprint(f\"[결과] 시뮬레이션 95% CI 하한 >= .80 최소 N = {n_cons}\")\n\nprint(\"\\n[검산] 셀 수준(2x2, 복합대칭) 생성\")\nchk = []\nfor rho in RHO_CHECK:\n    for n in sorted({n_ana - 5, n_ana, n_ana + 5}):\n        pw = sim_power_cells(n, NSIM_CHECK, rho)\n        chk.append(dict(rho=rho, N=n, power_cells=pw,\n                        mc_se=np.sqrt(pw * (1 - pw) / NSIM_CHECK),\n                        power_analytic=analytic_power(n)))\nchk = pd.DataFrame(chk)\nchk.to_csv(\"power_cells_check.csv\", index=False)\nprint(chk.to_string(index=False, float_format=lambda x: f\"{x:.4f}\"))\n"
+        }
+      },
+      {
+        "type": "tool_use",
+        "id": "tu_6163aba8d292",
+        "name": "run_command",
+        "input": {
+          "command": "python -I power_sim_dz03.py",
+          "timeout_min": 8
+        }
+      }
+    ]
+  },
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "tool_use_id": "tu_ce3d1e69bf63",
+        "content": "저장함: power_sim_dz03.py (3106자)"
+      },
+      {
+        "type": "tool_result",
+        "tool_use_id": "tu_6163aba8d292",
+        "content": "[exit 0] 3초 (로그: logs/144538_run1.log)\npython 3.12.16, numpy 2.5.4, scipy 1.18.1, pandas 3.1.1\nseed=20261111, nsim/N=20000, dz=0.3, alpha=0.05 (two-sided)\n  N  power_sim  mc_se  ci95_lo  ci95_hi  power_analytic\n 70     0.6994 0.0032   0.6930   0.7057          0.6967\n 71     0.7002 0.0032   0.6938   0.7065          0.7030\n 72     0.7044 0.0032   0.6980   0.7107          0.7092\n 73     0.7108 0.0032   0.7046   0.7171          0.7153\n 74     0.7221 0.0032   0.7159   0.7283          0.7213\n 75     0.7234 0.0032   0.7172   0.7296          0.7272\n 76     0.7343 0.0031   0.7282   0.7404          0.7330\n 77     0.7377 0.0031   0.7316   0.7437          0.7386\n 78     0.7476 0.0031   0.7415   0.7536          0.7442\n 79     0.7469 0.0031   0.7409   0.7529          0.7497\n 80     0.7529 0.0030   0.7469   0.7589          0.7551\n 81     0.7532 0.0030   0.7472   0.7592          0.7604\n 82     0.7663 0.0030   0.7604   0.7722          0.7656\n 83     0.7725 0.0030   0.7667   0.7784          0.7707\n 84     0.7714 0.0030   0.7656   0.7773          0.7757\n 85     0.7833 0.0029   0.7775   0.7890          0.7806\n 86     0.7886 0.0029   0.7829   0.7943          0.7854\n 87     0.7899 0.0029   0.7843   0.7955          0.7901\n 88     0.7969 0.0028   0.7913   0.8025          0.7948\n 89     0.8005 0.0028   0.7950   0.8060          0.7993\n 90     0.7968 0.0028   0.7912   0.8024          0.8038\n 91     0.8115 0.0028   0.8060   0.8169          0.8082\n 92     0.8141 0.0028   0.8087   0.8194          0.8125\n 93     0.8190 0.0027   0.8137   0.8243          0.8167\n 94     0.8224 0.0027   0.8171   0.8277          0.8208\n 95     0.8210 0.0027   0.8157   0.8263          0.8249\n 96     0.8320 0.0026   0.8269   0.8372          0.8288\n 97     0.8349 0.0026   0.8298   0.8401          0.8327\n 98     0.8365 0.0026   0.8314   0.8416          0.8365\n 99     0.8384 0.0026   0.8333   0.8435          0.8403\n100     0.8424 0.0026   0.8374   0.8474          0.8439\n101     0.8452 0.0026   0.8402   0.8503          0.8475\n102     0.8508 0.0025   0.8459   0.8558          0.8511\n103     0.8531 0.0025   0.8482   0.8580          0.8545\n104     0.8580 0.0025   0.8532   0.8628          0.8579\n105     0.8595 0.0025   0.8546   0.8643          0.8612\n106     0.8698 0.0024   0.8651   0.8745          0.8644\n107     0.8677 0.0024   0.8630   0.8724          0.8676\n108     0.8678 0.0024   0.8631   0.8724          0.8707\n109     0.8766 0.0023   0.8720   0.8812          0.8737\n110     0.8759 0.0023   0.8713   0.8804          0.8767\n\n[결과] 시뮬레이션 검정력 >= .80 최소 N = 89\n[결과] 해석해(비중심 t) >= .80 최소 N = 90\n[결과] 시뮬레이션 95% CI 하한 >= .80 최소 N = 91\n\n[검산] 셀 수준(2x2, 복합대칭) 생성\n   rho  N  power_cells  mc_se  power_analytic\n0.3000 85       0.7803 0.0029          0.7806\n0.3000 90       0.8048 0.0028          0.8038\n0.3000 95       0.8264 0.0027          0.8249\n0.5000 85       0.7769 0.0029          0.7806\n0.5000 90       0.7986 0.0028          0.8038\n0.5000 95       0.8242 0.0027          0.8249\n0.7000 85       0.7798 0.0029          0.7806\n0.7000 90       0.8026 0.0028          0.8038\n0.7000 95       0.8231 0.0027          0.8249\n"
+      }
+    ]
+  },
+  {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "실행이 끝났습니다. 스크립트와 결과 CSV를 첨부합니다."
+      },
+      {
+        "type": "tool_use",
+        "id": "tu_bcdce88b8689",
+        "name": "attach_file",
+        "input": {
+          "path": "power_sim_dz03.py"
+        }
+      },
+      {
+        "type": "tool_use",
+        "id": "tu_5c76cb87c732",
+        "name": "attach_file",
+        "input": {
+          "path": "power_curve_dz03.csv"
+        }
+      },
+      {
+        "type": "tool_use",
+        "id": "tu_3e1aa1590bfb",
+        "name": "attach_file",
+        "input": {
+          "path": "power_cells_check.csv"
+        }
+      }
+    ]
+  },
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "tool_use_id": "tu_bcdce88b8689",
+        "content": "첨부 예약: power_sim_dz03.py"
+      },
+      {
+        "type": "tool_result",
+        "tool_use_id": "tu_5c76cb87c732",
+        "content": "첨부 예약: power_curve_dz03.csv"
+      },
+      {
+        "type": "tool_result",
+        "tool_use_id": "tu_3e1aa1590bfb",
+        "content": "첨부 예약: power_cells_check.csv"
+      }
+    ]
+  },
+  {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "## 결론\n\n**권장 N = 90명** (dz = 0.3, 양측 α = .05, 검정력 .80). 탈락을 고려하지 않은 수치입니다.\n\n| 기준 | 최소 N | 근거 (`power_curve_dz03.csv`) |\n|---|---|---|\n| 시뮬레이션 검정력 ≥ .80 | 89 | power_sim = 0.8005 |\n| 해석해(비중심 t) ≥ .80 | 90 | power_analytic = 0.8038 |\n| 시뮬레이션 95% CI 하한 ≥ .80 (보수적) | 91 | ci95_lo = 0.8060 |\n\n시뮬레이션만 보면 89가 가장 먼저 .80을 넘습니다. 하지만 바로 다음 N = 90에서는 0.7968로 다시 내려갑니다. 몬테카를로 오차(SE ≈ 0.003) 때문에 경계 부근에서 곡선이 단조롭지 않은 것입니다. 그래서 89를 그대로 채택하지 않고, 해석해와 일치하는 **90**을 권장합니다. 오차까지 보수적으로 반영하려면 **91**을 쓰면 됩니다.\n\n## 가정\n\n- 주효과 A의 검정: 참가자별 차이점수 [mean(A1B1, A1B2) − mean(A2B1, A2B2)]에 대한 일표본(대응) t 검정을 씁니다. 이는 2×2 RM-ANOVA의 A 주효과 F(1, N−1)과 같습니다(F = t²).\n- 차이점수는 Normal(0.3, 1)을 따른다고 가정했습니다. 효과크기 dz는 차이점수 평균을 차이점수 SD로 나눈 값으로 정의합니다.\n- 결측과 탈락은 없고, 참가자는 서로 독립이라고 가정했습니다.\n- 반복 수: N = 70–110 각각에 대해 20,000회입니다. 시드는 20261111입니다.\n- 실행 환경: python 3.12.16, numpy 2.5.4, scipy 1.18.1, pandas 3.1.1.\n\n## 검산: 셀 수준 생성 (`power_cells_check.csv`)\n\n4개 셀을 복합대칭 구조(셀 간 상관 ρ = 0.3, 0.5, 0.7)로 생성하고, 셀별 평균 차이는 dz가 0.3이 되도록 맞췄습니다. B 주효과와 A×B 상호작용은 0으로 두었습니다. N = 90에서의 검정력은 다음과 같습니다.\n\n| ρ | 시뮬레이션 검정력 | 해석해 |\n|---|---|---|\n| 0.3 | 0.8048 | 0.8038 |\n| 0.5 | 0.7986 | 0.8038 |\n| 0.7 | 0.8026 | 0.8038 |\n\n세 경우 모두 해석해와 MC 오차 범위 안에서 일치합니다. 즉 dz를 기준으로 효과를 정하면 셀 간 상관은 필요한 N에 영향을 주지 않습니다.\n\n## 주의점\n\n- **효과크기의 출처를 확인해야 합니다.** 선행연구가 보고한 값이 dz가 아니라 d_av나 셀 SD 기준 d라면, dz = d / √(2(1−ρ))로 환산해야 합니다. 이때 ρ에 따라 필요한 N이 크게 달라집니다. 예를 들어 ρ = 0.5이면 d = dz이고, ρ가 이보다 높으면 dz가 커져서 필요한 N이 줄어듭니다.\n- **문항 수준 분석은 다릅니다.** 문항이 여러 개이고 혼합효과모형(참가자와 문항 랜덤효과)으로 분석할 계획이라면, 이 계산은 그대로 적용되지 않습니다. 그 경우에는 문항 수와 분산 성분을 가정한 별도 시뮬레이션이 필요합니다.\n- **탈락을 반영해야 합니다.** 예상 탈락률을 r이라 하면 모집 인원은 90 / (1 − r)로 잡습니다.\n\n첨부: `power_sim_dz03.py`, `power_curve_dz03.csv`, `power_cells_check.csv`"
+      }
+    ]
+  }
+]

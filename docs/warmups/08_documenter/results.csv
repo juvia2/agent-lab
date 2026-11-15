@@ -1,0 +1,13 @@
+model,phenomenon,n_items,n_correct,accuracy
+model_S,subject_verb_agreement,60,37,0.617
+model_S,npi_licensing,60,33,0.55
+model_S,filler_gap,40,30,0.75
+model_S,reflexive_binding,12,9,0.75
+model_M,subject_verb_agreement,60,51,0.85
+model_M,npi_licensing,60,49,0.817
+model_M,filler_gap,40,31,0.775
+model_M,reflexive_binding,12,11,0.917
+model_L,subject_verb_agreement,60,51,0.85
+model_L,npi_licensing,60,46,0.767
+model_L,filler_gap,40,38,0.95
+model_L,reflexive_binding,12,12,1.0

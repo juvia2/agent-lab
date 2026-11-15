@@ -27,11 +27,13 @@ def _dirs(base: Path | None = None) -> tuple[Path, Path]:
 
 
 def enqueue(role: str, title: str, description: str, file: str | None = None, *,
-            color: int = 0x3498DB, base: Path | None = None) -> Path:
-    """보고 하나를 큐에 넣는다. file 은 저장소 루트 기준 상대 경로(첨부)."""
+            color: int = 0x3498DB, base: Path | None = None, group: str | None = None) -> Path:
+    """보고 하나를 큐에 넣는다. file 은 저장소 루트 기준 상대 경로(첨부).
+    group: 한 과제에서 나온 보고 묶음. 묶음의 첫 보고는 채널에, 나머지는 그 글에 연 스레드에 올라간다."""
     pending, _ = _dirs(base)
     item = {"role": role, "title": title[:250], "description": description[:MAX_DESC],
-            "file": file, "color": color, "created": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            "file": file, "color": color, "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "classification": "restricted", "publication_approved": False, "group": group}
     path = pending / f"{time.strftime('%Y%m%d-%H%M%S')}_{len(list(pending.iterdir())):03d}_{role}.json"
     path.write_text(json.dumps(item, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
@@ -51,6 +53,35 @@ def pending_items(base: Path | None = None) -> list[tuple[Path, dict]]:
 def mark_sent(path: Path, base: Path | None = None) -> None:
     _, sent = _dirs(base)
     path.replace(sent / path.name)
+
+
+def _threads_file(base: Path | None) -> Path:
+    return _dirs(base)[0].parent / "threads.json"
+
+
+def thread_for(item: dict, base: Path | None = None) -> int | None:
+    """이 보고가 들어갈 스레드 ID. 묶음이 없거나 아직 스레드가 없으면(=묶음의 첫 보고) None."""
+    g = item.get("group")
+    if not g:
+        return None
+    try:
+        return json.loads(_threads_file(base).read_text(encoding="utf-8")).get(g)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def remember_thread(group: str, thread_id: int, base: Path | None = None) -> None:
+    f = _threads_file(base)
+    try:
+        m = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        m = {}
+    m[group] = int(thread_id)
+    f.write_text(json.dumps(m, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def publication_allowed(item: dict) -> bool:
+    return item.get("classification") == "public" and item.get("publication_approved") is True
 
 
 def attachment(item: dict) -> Path | None:

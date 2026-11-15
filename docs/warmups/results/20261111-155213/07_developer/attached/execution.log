@@ -1,0 +1,47 @@
+FIXED VERSION (exit 0)
+.....                                                                    [100%]
+5 passed in 0.01s
+
+ORIGINAL ATTACHMENT (exit 1)
+FFF..                                                                    [100%]
+=================================== FAILURES ===================================
+______________________ test_one_word_includes_final_word _______________________
+
+    def test_one_word_includes_final_word():
+>       assert module.word_surprisal([-2.0 * __import__("math").log(2)], [0]) == pytest.approx([2.0])
+E       assert [] == approx([2.0 ± 2.0e-06])
+E         
+E         Impossible to compare lists with different sizes.
+E         Lengths: 1 and 0
+
+tests/test_surprisal_utils.py:15: AssertionError
+____________________ test_subwords_are_summed_for_each_word ____________________
+
+    def test_subwords_are_summed_for_each_word():
+        import math
+    
+>       assert module.word_surprisal([-math.log(2), -2 * math.log(2), -3 * math.log(2)], [0, 0, 1]) == pytest.approx([3.0, 3.0])
+E       assert [3.0] == approx([3.0 ±....0 ± 3.0e-06])
+E         
+E         Impossible to compare lists with different sizes.
+E         Lengths: 2 and 1
+
+tests/test_surprisal_utils.py:21: AssertionError
+___________________________ test_mean_uses_all_words ___________________________
+
+    def test_mean_uses_all_words():
+        import math
+    
+>       assert module.mean_surprisal([-math.log(2), -3 * math.log(2)], [0, 1]) == pytest.approx(2.0)
+E       assert 1.0 == 2.0 ± 2.0e-06
+E         
+E         comparison failed
+E         Obtained: 1.0
+E         Expected: 2.0 ± 2.0e-06
+
+tests/test_surprisal_utils.py:27: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_surprisal_utils.py::test_one_word_includes_final_word - ass...
+FAILED tests/test_surprisal_utils.py::test_subwords_are_summed_for_each_word
+FAILED tests/test_surprisal_utils.py::test_mean_uses_all_words - assert 1.0 =...
+3 failed, 2 passed in 0.02s

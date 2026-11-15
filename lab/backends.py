@@ -11,7 +11,7 @@
   api     : Anthropic API      (토큰 과금. 기본 경로에는 넣지 않음)
 
 CLI 3종은 각자 에이전트 루프를 갖고 있지만 여기서는 '한 턴짜리 모델'로만 쓴다. 내장 도구(셸·파일)는 끄거나 읽기전용으로 두고,
-도구 호출은 `<tool_call>{...}</tool_call>` 텍스트 규약으로 주고받는다. 실제 도구는 연구실의 Toolbox 가 실행한다(권한·샌드박스 유지).
+도구 호출은 `<lab_call>{...}</lab_call>` 텍스트 규약으로 주고받는다. 실제 도구는 연구실의 Toolbox 가 실행한다(권한·샌드박스 유지).
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -32,11 +33,13 @@ from types import SimpleNamespace
 from typing import Any
 
 from .llm import NoBackend
+from .policy import load_policy
 
 log = logging.getLogger("lab.backends")
 
 ROLE_RE = re.compile(r"\[ROLE:(\w+)\]")
-TOOL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+# lab_call: Hermes 런타임이 <tool_call> 을 자기 문법으로 가로채 지우므로 다른 태그를 쓴다. 옛 태그도 계속 읽는다.
+TOOL_RE = re.compile(r"<(lab_call|tool_call)>(.*?)</\1>", re.DOTALL)
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 RATE_RE = re.compile(r"rate.?limit|usage limit|limit reached|quota|exhausted|too many requests|\b429\b|overloaded|"
@@ -109,8 +112,8 @@ def render_transcript(messages: list[dict], keep_recent: int = 8) -> str:
                     elif b["type"] == "tool_use":
                         names[b["id"]] = b["name"]
                         inp = _shrink(b["input"], 600) if old else b["input"]
-                        parts.append("<tool_call>" + json.dumps({"name": b["name"], "input": inp}, ensure_ascii=False)
-                                     + "</tool_call>")
+                        parts.append("<lab_call>" + json.dumps({"name": b["name"], "input": inp}, ensure_ascii=False)
+                                     + "</lab_call>")
             out.append("[당신의 이전 응답]\n" + "\n".join(parts))
     return "\n\n".join(out)
 
@@ -123,12 +126,27 @@ def tool_protocol(tools: list[dict]) -> str:
     return (
         "## 도구 사용 규약 (반드시 지킨다)\n"
         "당신 환경의 내장 도구(셸, 파일 읽기/쓰기, 웹 등)는 **사용하지 않는다**. 아래 연구실 도구만 쓴다.\n"
+        "- 아래 도구는 당신의 내장 함수 목록에는 보이지 않는다. 정상이다(연결이 끊긴 것이 아니다). "
+        "아래 형식의 텍스트를 쓰면 연구실 프로그램이 받아 실행하고 결과를 돌려준다.\n"
+        "- 당신 환경의 작업 폴더가 비어 있거나 읽기 전용인 것도 정상이다. 파일 읽기·쓰기·실행은 모두 아래 도구로 한다. "
+        "'도구가 없다/읽기 전용이라 못 한다'고 답하지 않는다.\n"
         "도구를 부르려면 응답에 다음 형식을 그대로 쓴다(여러 개를 한 번에 써도 된다):\n"
-        '<tool_call>{"name": "도구이름", "input": {"인자": "값"}}</tool_call>\n'
+        '<lab_call>{"name": "도구이름", "input": {"인자": "값"}}</lab_call>\n'
         "- 안쪽은 반드시 유효한 JSON 한 개다. 문자열 안의 줄바꿈·따옴표는 JSON 규칙대로 이스케이프한다.\n"
         "- 도구를 부른 응답은 거기서 끝낸다. 결과는 다음 턴에 [도구 결과]로 돌아온다. 결과를 지어내지 않는다.\n"
-        "- 도구가 더 필요 없고 일을 마쳤으면 tool_call 없이 최종 답변을 쓴다(종료 도구가 있으면 그것을 호출한다).\n\n"
+        "- 도구가 더 필요 없고 일을 마쳤으면 lab_call 없이 최종 답변을 쓴다(종료 도구가 있으면 그것을 호출한다).\n\n"
         "## 사용 가능한 도구\n" + cat)
+
+
+def _call_block(raw: str) -> dict:
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(raw)
+        return {"type": "tool_use", "id": "tu_" + uuid.uuid4().hex[:12],
+                "name": str(obj["name"]), "input": obj.get("input") or {}}
+    except Exception as e:
+        return {"type": "tool_use", "id": "tu_" + uuid.uuid4().hex[:12], "name": "_parse_error",
+                "input": {"error": f"lab_call JSON 파싱 실패: {e}", "raw_head": raw[:200]}}
 
 
 def parse_reply(text: str) -> list[dict]:
@@ -139,19 +157,18 @@ def parse_reply(text: str) -> list[dict]:
         pre = text[pos:m.start()].strip()
         if pre:
             blocks.append({"type": "text", "text": pre})
-        raw = m.group(1).strip()
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
-        try:
-            obj = json.loads(raw)
-            blocks.append({"type": "tool_use", "id": "tu_" + uuid.uuid4().hex[:12],
-                           "name": str(obj["name"]), "input": obj.get("input") or {}})
-        except Exception as e:
-            blocks.append({"type": "tool_use", "id": "tu_" + uuid.uuid4().hex[:12], "name": "_parse_error",
-                           "input": {"error": f"tool_call JSON 파싱 실패: {e}", "raw_head": raw[:200]}})
+        blocks.append(_call_block(m.group(2)))
         pos = m.end()
-    tail = text[pos:].strip()
-    if tail:
-        blocks.append({"type": "text", "text": tail})
+    tail = text[pos:]
+    # 닫는 태그 없이 끝난 마지막 호출(codex 가 닫는 태그 대신 깨진 토큰을 낸 사례): JSON 이 온전하면 받는다.
+    m = re.search(r"<(?:lab_call|tool_call)>", tail)
+    if m:
+        if tail[:m.start()].strip():
+            blocks.append({"type": "text", "text": tail[:m.start()].strip()})
+        blocks.append(_call_block(tail[m.end():]))
+        tail = ""
+    if tail.strip():
+        blocks.append({"type": "text", "text": tail.strip()})
     return blocks
 
 
@@ -226,7 +243,9 @@ class CLIBackend(Backend):
                 out_file = None
             elif self.kind == "codex":
                 out_file = str(Path(cwd) / "last.txt")
+                # 내장 셸을 끈다: 켜 두면 codex 가 빈 임시 폴더를 셸로 뒤지다 "파일 없음"으로 끝낸다(워밍업 07).
                 cmd = [self.binary, "exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only",
+                       "--disable", "shell_tool", "--disable", "unified_exec",
                        "--json", "-o", out_file, "-C", cwd]
                 if model:
                     cmd += ["-m", model]
@@ -304,14 +323,86 @@ class CLIBackend(Backend):
             return so, 0, 0
 
 
+class HermesBackend(Backend):
+    """Hermes를 한 턴 호출한다. 실험 파일/셸 도구는 연구실 Toolbox만 실행한다."""
+    name = "hermes"
+
+    def __init__(self, binary: str, profile: str, provider: str, timeout_s: int):
+        self.binary, self.profile, self.provider, self.timeout = binary, profile, provider, timeout_s
+
+    def available(self) -> tuple[bool, str]:
+        if not Path(self.binary).is_file():
+            return False, f"Hermes CLI 없음: {self.binary}"
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", self.profile):
+            return False, "HERMES_PROFILE 형식 오류"
+        if not self.provider or self.provider == "auto":
+            return False, "HERMES_PROVIDER를 명시해야 함(auto 금지)"
+        if not (Path.home() / ".hermes/profiles" / self.profile / "config.yaml").is_file():
+            return False, f"Hermes 프로필 없음: {self.profile}"
+        return True, ""
+
+    def complete(self, *, system, messages, tools, model, max_tokens):
+        ok, why = self.available()
+        if not ok:
+            raise BackendUnavailable(why, cooldown=3600)
+        prompt = (system + "\n\n" + tool_protocol(tools) + "\n\n# 대화\n" +
+                  render_transcript(messages) + "\n\n---\n위 대화의 다음 한 턴만 응답하세요.")
+        cmd = [self.binary, "-p", self.profile, "chat", "--query-file", "-", "--oneshot",
+               "--format", "stream-json", "--toolsets", "memory,skills", "--provider", self.provider,
+               "--source", "tool"]
+        if model:
+            cmd += ["--model", model]
+        # 연구실 .env의 봇 토큰과 모델 키를 자식 프로세스로 넘기지 않는다.
+        env = {k: os.environ[k] for k in ("HOME", "PATH", "USER", "TMPDIR", "LANG", "LC_ALL", "TERM")
+               if k in os.environ}
+        try:
+            with tempfile.TemporaryDirectory(prefix="lab-hermes-") as cwd:
+                p = subprocess.run(cmd, input=prompt, capture_output=True, text=True, cwd=cwd,
+                                   env=env, timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            raise BackendError(f"hermes: {self.timeout}초 안에 응답하지 않음")
+        except FileNotFoundError:
+            raise BackendUnavailable("Hermes CLI 실행 파일 없음", cooldown=3600)
+        result = None
+        for line in p.stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "result":
+                result = event
+        if p.returncode != 0 or not result or result.get("exit_code") != 0:
+            raise _classify(str((result or {}).get("error") or p.stderr or p.stdout[-500:]), "hermes")
+        reply = str(result.get("text") or "")
+        if not reply.strip():
+            raise BackendError("hermes: 빈 응답")
+        usage = result.get("tokens") or {}
+        return _resp(parse_reply(THINK_RE.sub("", reply)),
+                     int(usage.get("input") or _est(prompt)), int(usage.get("output") or _est(reply)), "hermes")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class OpenAICompatBackend(Backend):
     """Ollama / LM Studio / mlx-lm.server 같은 OpenAI 호환 로컬 서버. 도구 호출은 서버의 네이티브 function calling."""
     name = "local"
 
-    def __init__(self, base_url: str, default_model: str, api_key: str = "", timeout_s: int = 1800):
+    def __init__(self, base_url: str, default_model: str, api_key: str = "", timeout_s: int = 1800,
+                 reasoning_effort: str | None = None):
         self.base, self.default_model, self.key, self.timeout = base_url.rstrip("/"), default_model, api_key, timeout_s
+        self.reasoning_effort = reasoning_effort
 
     def available(self) -> tuple[bool, str]:
+        try:
+            url = urllib.parse.urlsplit(self.base)
+            local = url.scheme in {"http", "https"} and url.hostname in {"localhost", "127.0.0.1", "::1"}
+        except ValueError:
+            local = False
+        if not local:
+            return False, "LOCAL_BASE_URL 은 루프백 주소여야 함"
         if not self.default_model:
             return False, "LOCAL_MODEL 이 설정되지 않음(.env)"
         return True, ""
@@ -352,8 +443,13 @@ class OpenAICompatBackend(Backend):
         return out
 
     def complete(self, *, system, messages, tools, model, max_tokens):
+        ok, why = self.available()
+        if not ok:
+            raise BackendUnavailable(why, cooldown=300)
         body: dict = {"model": model or self.default_model, "messages": self._to_openai(system, messages),
                       "max_tokens": max_tokens, "stream": False}
+        if self.reasoning_effort is not None:
+            body["reasoning_effort"] = self.reasoning_effort
         if tools:
             body["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                                "parameters": t["input_schema"]}} for t in tools]
@@ -361,7 +457,9 @@ class OpenAICompatBackend(Backend):
                                      headers={"Content-Type": "application/json",
                                               **({"Authorization": f"Bearer {self.key}"} if self.key else {})})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            # A local endpoint must not redirect the model input to another host.
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+            with opener.open(req, timeout=self.timeout) as r:
                 j = json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             msg = e.read().decode("utf-8", "replace")[:300]
@@ -469,8 +567,12 @@ class Router:
         m = ROLE_RE.search(system)
         role = m.group(1) if m else "director"
         routes = self.cfg.routes.get(role) or self.cfg.routes.get("default") or []
+        policy = kw.get("data_policy") or load_policy(self.cfg)
         tried: list[str] = []
         for name, model in routes:
+            if not policy.allows_backend(name):
+                tried.append(f"{name}: 자료 정책상 외부 모델 전송 불가")
+                continue
             be = self.backends.get(name)
             if be is None:
                 tried.append(f"{name}: 알 수 없는 백엔드")
@@ -543,6 +645,7 @@ def build_backends(cfg) -> dict[str, Backend]:
         "claude": CLIBackend("claude", cfg.claude_bin, t, cfg.keep_api_keys),
         "codex": CLIBackend("codex", cfg.codex_bin, t, cfg.keep_api_keys),
         "gemini": CLIBackend("gemini", cfg.gemini_bin, t, cfg.keep_api_keys),
+        "hermes": HermesBackend(cfg.hermes_bin, cfg.hermes_profile, cfg.hermes_provider, t),
         "local": OpenAICompatBackend(cfg.local_base_url, cfg.local_model, cfg.local_api_key, t * 2),
     }
     if cfg.anthropic_api_key:

@@ -54,6 +54,7 @@ def _clip(text: str, limit: int = 14000) -> str:
 
 def run_agent(client, *, model: str, system: str, prompt: str | None = None,
               messages: list | None = None, tools: list[dict], execute: Callable[[str, dict], ToolOutput],
+              data_policy=None,
               on_usage: Callable[[int], None] | None = None,
               should_stop: Callable[[], bool] | None = None,
               max_turns: int = 40, max_tokens: int = 8192) -> AgentResult:
@@ -66,6 +67,8 @@ def run_agent(client, *, model: str, system: str, prompt: str | None = None,
         if should_stop and should_stop():
             raise Stopped()
         kwargs = dict(model=model, max_tokens=max_tokens, system=system, messages=msgs)
+        if data_policy is not None:
+            kwargs["data_policy"] = data_policy
         if tools:
             kwargs["tools"] = tools
         resp = client.messages.create(**kwargs)
@@ -88,7 +91,7 @@ def run_agent(client, *, model: str, system: str, prompt: str | None = None,
             try:
                 if c["name"] == "_parse_error":      # CLI 텍스트 규약에서 tool_call JSON 이 깨진 경우
                     out = ToolOutput(f"{c['input'].get('error')}\n시작 부분: {c['input'].get('raw_head')}\n"
-                                     "<tool_call>{\"name\": ..., \"input\": {...}}</tool_call> 형식의 유효한 JSON 으로 다시 호출하세요.",
+                                     "<lab_call>{\"name\": ..., \"input\": {...}}</lab_call> 형식의 유효한 JSON 으로 다시 호출하세요.",
                                      is_error=True)
                 else:
                     out = execute(c["name"], c["input"])

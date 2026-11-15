@@ -63,6 +63,7 @@ def write_manifest(path: str | Path = "results/run_manifest.json", *, seed=None,
         "seed": seed,
         "packages": versions,
         "data_sha256": {f: file_sha256(f) for f in (data_files or []) if Path(f).exists()},
+        "protocol_sha256": file_sha256("protocol.json") if Path("protocol.json").is_file() else None,
     }
     manifest.update(extra)
     p = Path(path)

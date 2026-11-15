@@ -1,0 +1,43 @@
+$ python -m pytest -q tests/test_surprisal_utils.py > pytest_before.log 2>&1; status=$?; cat pytest_before.log; exit $status
+[exit 1] 0.6s
+
+FFF..                                                                    [100%]
+=================================== FAILURES ===================================
+_____________________ test_single_word_includes_final_word _____________________
+
+    def test_single_word_includes_final_word():
+>       assert word_surprisal([-math.log(2)], [0]) == pytest.approx([1.0])
+E       assert [] == approx([1.0 ± 1.0e-06])
+E         
+E         Impossible to compare lists with different sizes.
+E         Lengths: 1 and 0
+
+tests/test_surprisal_utils.py:9: AssertionError
+_____________________ test_subword_surprisals_sum_by_word ______________________
+
+    def test_subword_surprisals_sum_by_word():
+        logprobs = [-math.log(2), -math.log(4), -math.log(8)]
+>       assert word_surprisal(logprobs, [0, 0, 1]) == pytest.approx([3.0, 3.0])
+E       assert [3.0] == approx([3.0 ±....0 ± 3.0e-06])
+E         
+E         Impossible to compare lists with different sizes.
+E         Lengths: 2 and 1
+
+tests/test_surprisal_utils.py:14: AssertionError
+______________________ test_mean_surprisal_uses_all_words ______________________
+
+    def test_mean_surprisal_uses_all_words():
+        logprobs = [-math.log(2), -math.log(8)]
+>       assert mean_surprisal(logprobs, [0, 1]) == pytest.approx(2.0)
+E       assert 1.0 == 2.0 ± 2.0e-06
+E         
+E         comparison failed
+E         Obtained: 1.0
+E         Expected: 2.0 ± 2.0e-06
+
+tests/test_surprisal_utils.py:19: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_surprisal_utils.py::test_single_word_includes_final_word - ...
+FAILED tests/test_surprisal_utils.py::test_subword_surprisals_sum_by_word - a...
+FAILED tests/test_surprisal_utils.py::test_mean_surprisal_uses_all_words - as...
+3 failed, 2 passed in 0.02s

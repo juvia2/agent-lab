@@ -52,7 +52,7 @@ def enqueue_literature():
 def main():
     if "--enqueue-literature" in sys.argv:
         enqueue_literature()
-    items = learning.pending_items()
+    items = [(p, i) for p, i in learning.pending_items() if learning.publication_allowed(i)]
     if not items:
         print("보낼 학습 보고가 없습니다.")
         return
@@ -91,13 +91,21 @@ def main():
             print(f"  · {name:<24} {item['title']} (점검만)")
             continue
         f = learning.attachment(item)
+        tid = learning.thread_for(item)             # 같은 과제의 보고는 첫 글에 연 스레드로 모은다
         try:
-            call(tok, "POST", f"/channels/{cid}/messages", {"embeds": [learning.embed(item, name)]},
-                 files=[f] if f else None)
+            msg = call(tok, "POST", f"/channels/{tid or cid}/messages", {"embeds": [learning.embed(item, name)]},
+                       files=[f] if f else None)
         except DiscordError as e:
             hint = " → Reset Token 후 add_bot_tokens.py --director" if role == "director" and "401" in str(e) else ""
             print(f"  ❌ {name:<24} {e}{hint} (큐에 남김)")
             continue
+        if item.get("group") and not tid:
+            try:
+                th = call(look, "POST", f"/channels/{cid}/messages/{msg['id']}/threads",
+                          {"name": item["title"][:100], "auto_archive_duration": 10080})
+                learning.remember_thread(item["group"], th["id"])
+            except DiscordError as e:
+                print(f"  ⚠️ 스레드 생성 실패({e}) → 나머지는 채널에 올림")
         learning.mark_sent(path)
         ok += 1
         print(f"  ✅ {name:<24} {item['title']}")

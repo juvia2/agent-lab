@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -9,11 +10,13 @@ from lab.sandbox import Sandbox
 from lab.tools import CONSULTANTS, Toolbox
 
 RUN_PY = '''import json
-import numpy as np
-from lab_utils import set_seed, write_manifest, bootstrap_ci
+import random
+from statistics import mean
+from lab_utils import set_seed, write_manifest
 set_seed(0)
-x = np.random.normal(0.3, 1.0, 50)
-est, lo, hi = bootstrap_ci(x, n_boot=300)
+x = [random.gauss(0.3, 1.0) for _ in range(50)]
+est = mean(x)
+lo, hi = min(x), max(x)
 json.dump({"mean": est, "ci": [lo, hi], "n": 50}, open("results/results.json", "w"))
 write_manifest(seed=0)
 print("ok", round(est, 3))
@@ -33,7 +36,7 @@ def memo_turn():
 def build_turns():
     return [[T("write_file", path="code/run_experiment.py", content=RUN_PY)],
             [T("run_command", command="PYTHONPATH=code python3 code/run_experiment.py")],
-            [T("finish_build", status="ready", summary="구현 완료", entrypoints=["python3 code/run_experiment.py"],
+            [T("finish_build", status="ready", summary="구현 완료", entrypoints=["PYTHONPATH=code python3 code/run_experiment.py"],
                tests_run=["smoke ok"])]]
 
 
@@ -46,7 +49,8 @@ def analyze_turns():
 
 def plan_turn(**over):
     base = dict(plan_markdown="# 계획\n가설...", summary="계획 요약", needs_network=False,
-                needs_host_accel=False, est_runtime_min=5, risks=[])
+                needs_host_accel=False, est_runtime_min=5,
+                run_commands=["PYTHONPATH=code python3 code/run_experiment.py"], risks=[])
     base.update(over)
     return [T("finish_plan", **base)]
 
@@ -85,10 +89,17 @@ def submit(lab, **kw):
     return lab.submit("테스트 실험", "## 연구 질문\n테스트", **kw)
 
 
+def approve_plan_and_finish(lab, exp):
+    assert lab.process_one() is True
+    assert lab.ledger.get(exp["id"])["status"] == "awaiting_approval"
+    assert "승인" in lab.approve(exp["id"])
+    assert lab.process_one() is True
+
+
 def test_happy_path(make_lab):
     lab, notifier = make_lab(script())
     exp = submit(lab)
-    assert lab.process_one() is True
+    approve_plan_and_finish(lab, exp)
     e = lab.ledger.get(exp["id"])
     assert e["status"] == "done", e["error"]
     d = lab.cfg.experiments_dir / exp["id"]
@@ -98,6 +109,9 @@ def test_happy_path(make_lab):
         assert (d / f).exists(), f
     assert "검증 결과 (자동 기록)" in (d / "report/report.md").read_text()
     assert (lab.cfg.notebook_dir / f"{exp['id']}.md").exists()
+    protocol = d / "protocol.json"
+    assert json.loads((d / "results/run_manifest.json").read_text())["protocol_sha256"] == hashlib.sha256(protocol.read_bytes()).hexdigest()
+    assert json.loads((lab.cfg.lab_home / "audits" / f"{exp['id']}.jsonl").read_text().splitlines()[-1])["exit_code"] == 0
     assert e["tokens_used"] > 0
     texts = "\n".join(t for _, t, _ in notifier.sent)
     for name in ("언어학 전문가", "백엔드 개발자", "실험 실무 담당", "서류화·보고 담당", "검증 테스트 담당"):
@@ -105,6 +119,38 @@ def test_happy_path(make_lab):
     # 완료 보고에는 보고서가 첨부된다
     assert any(files and files[0].endswith("report/report.md") for _, t, files in notifier.sent if "완료" in t)
     assert lab.process_one() is False
+
+
+def test_plan_without_run_commands_stops_before_approval(make_lab):
+    lab, _ = make_lab(script(plan=plan_turn(run_commands=[])))
+    exp = submit(lab)
+    lab.process_one()
+    assert lab.ledger.get(exp["id"])["status"] == "failed"
+
+
+def test_protocol_change_after_approval_blocks_build(make_lab):
+    lab, _ = make_lab(script())
+    exp = submit(lab)
+    lab.process_one()
+    lab.approve(exp["id"])
+    protocol = lab.cfg.experiments_dir / exp["id"] / "protocol.json"
+    protocol.write_text(protocol.read_text() + " ")
+    lab.process_one()
+    assert lab.ledger.get(exp["id"])["status"] == "failed"
+    assert "실행 명세" in lab.ledger.get(exp["id"])["error"]
+
+
+def test_manifest_must_match_approved_protocol(make_lab):
+    s = script()
+    bad_run = RUN_PY.replace("write_manifest(seed=0)", "write_manifest(seed=0, protocol_sha256='wrong')")
+    s["developer"][0] = [T("write_file", path="code/run_experiment.py", content=bad_run)]
+    lab, _ = make_lab(s)
+    exp = submit(lab)
+    lab.process_one()
+    lab.approve(exp["id"])
+    lab.process_one()
+    assert lab.ledger.get(exp["id"])["status"] == "failed"
+    assert "run_manifest.json" in lab.ledger.get(exp["id"])["error"]
 
 
 def test_network_requires_approval_then_continues(make_lab):
@@ -125,7 +171,7 @@ def test_host_and_long_runtime_gate(make_lab):
     exp = submit(lab)
     lab.process_one()
     reasons = json.loads(lab.ledger.get(exp["id"])["approval_reasons"])
-    assert len(reasons) == 2
+    assert len(reasons) == 3
 
 
 def test_reject_stops(make_lab):
@@ -137,10 +183,44 @@ def test_reject_stops(make_lab):
     assert lab.process_one() is False
 
 
+def test_change_request_stops_execution_until_reapproved(make_lab):
+    s = script()
+    s["practitioner"] = [plan_turn(), [T("request_change", current="표본 50개", proposed="표본 40개",
+                                          reason="입력 누락", impact="검정력 감소")], *exec_turns()]
+    lab, _ = make_lab(s)
+    exp = submit(lab)
+    lab.process_one()
+    assert lab.ledger.get(exp["id"])["status"] == "awaiting_approval"
+    lab.approve(exp["id"])
+    lab.process_one()
+    e = lab.ledger.get(exp["id"])
+    assert e["status"] == "awaiting_approval" and e["phase"] == "execute" and not e["approved"]
+    assert lab.process_one() is False
+    assert not (lab.cfg.experiments_dir / exp["id"] / "notes/execution.json").exists()
+    lab.approve(exp["id"])
+    assert (lab.cfg.experiments_dir / exp["id"] / "notes/approved_change_1.md").exists()
+    lab.process_one()
+    assert lab.ledger.get(exp["id"])["status"] == "done"
+
+
+def test_practitioner_command_cannot_silently_change_code(make_lab):
+    s = script()
+    s["practitioner"] = [plan_turn(), [T("run_command", command="echo '# changed' >> code/run_experiment.py")],
+                         [T("finish_execution", status="success", notes="완료")]]
+    lab, _ = make_lab(s)
+    exp = submit(lab)
+    lab.process_one()
+    lab.approve(exp["id"])
+    lab.process_one()
+    e = lab.ledger.get(exp["id"])
+    assert e["status"] == "failed" and "성공 기록이 없음" in e["error"]
+    assert "# changed" not in (lab.cfg.experiments_dir / exp["id"] / "code/run_experiment.py").read_text()
+
+
 def test_review_revision_loop_routes_to_owner(make_lab):
     lab, notifier = make_lab(script(revise=True))
     exp = submit(lab)
-    lab.process_one()
+    approve_plan_and_finish(lab, exp)
     e = lab.ledger.get(exp["id"])
     assert e["status"] == "done", e["error"]
     d = lab.cfg.experiments_dir / exp["id"]
@@ -157,12 +237,63 @@ def test_unresolved_review_is_disclosed(make_lab):
     s["documenter"] = report_turns() * 3
     lab, notifier = make_lab(s)
     exp = submit(lab)
-    lab.process_one()
+    approve_plan_and_finish(lab, exp)
     e = lab.ledger.get(exp["id"])
-    assert e["status"] == "done"
+    assert e["status"] == "failed" and e["phase"] == "report"
     report = (lab.cfg.experiments_dir / exp["id"] / "report/report.md").read_text()
     assert "해결되지 않은 지적" in report and "수치 불일치" in report
-    assert any("미해결" in t for _, t, _ in notifier.sent)
+    assert not (lab.cfg.notebook_dir / f"{exp['id']}.md").exists()
+    assert not any(t.startswith(f"✅ **{exp['id']} 완료**") for _, t, _ in notifier.sent)
+
+
+@pytest.mark.parametrize("phase,role,turn", [
+    ("build", "developer", [T("finish_build", status="partial", summary="코드 미완성",
+                              entrypoints=[], tests_run=[])]),
+    ("execute", "practitioner", [T("finish_execution", status="partial", notes="일부만 실행")]),
+    ("analyze", "developer", [T("finish_build", status="partial", summary="분석 미완성",
+                                entrypoints=[], tests_run=[])]),
+])
+def test_partial_stage_does_not_advance(make_lab, phase, role, turn):
+    s = script()
+    if phase == "build":
+        s[role] = [turn]
+    elif phase == "execute":
+        s[role] = [plan_turn(), turn]
+    else:
+        s[role] = [*build_turns(), turn]
+    lab, notifier = make_lab(s)
+    exp = submit(lab)
+    approve_plan_and_finish(lab, exp)
+    e = lab.ledger.get(exp["id"])
+    assert e["status"] == "failed" and e["phase"] == phase
+    assert "미완료" in e["error"]
+    assert not (lab.cfg.notebook_dir / f"{exp['id']}.md").exists()
+    assert not any(t.startswith(f"✅ **{exp['id']} 완료**") for _, t, _ in notifier.sent)
+
+
+def test_unverified_review_does_not_publish(make_lab):
+    s = script()
+    s["tester"] = [[("text", "검증 도구 실패")]]
+    lab, notifier = make_lab(s)
+    exp = submit(lab)
+    approve_plan_and_finish(lab, exp)
+    e = lab.ledger.get(exp["id"])
+    assert e["status"] == "failed" and e["phase"] == "report"
+    assert "검증 미완료" in e["error"]
+    assert not (lab.cfg.notebook_dir / f"{exp['id']}.md").exists()
+    assert not any(t.startswith(f"✅ **{exp['id']} 완료**") for _, t, _ in notifier.sent)
+
+
+def test_pass_with_critical_issue_does_not_publish(make_lab):
+    s = script()
+    s["tester"] = [review("pass", [dict(severity="critical", owner="developer", problem="원자료 누출")])]
+    lab, notifier = make_lab(s)
+    exp = submit(lab)
+    approve_plan_and_finish(lab, exp)
+    e = lab.ledger.get(exp["id"])
+    assert e["status"] == "failed" and "미해결 주요 지적 1건" in e["error"]
+    assert not (lab.cfg.notebook_dir / f"{exp['id']}.md").exists()
+    assert not any(t.startswith(f"✅ **{exp['id']} 완료**") for _, t, _ in notifier.sent)
 
 
 def test_execution_failure_goes_back_to_developer_once(make_lab):
@@ -173,7 +304,7 @@ def test_execution_failure_goes_back_to_developer_once(make_lab):
     s["developer"] = [*build_turns(), *build_turns(), *analyze_turns()]
     lab, notifier = make_lab(s)
     exp = submit(lab)
-    lab.process_one()
+    approve_plan_and_finish(lab, exp)
     assert lab.ledger.get(exp["id"])["status"] == "done"
     assert any("돌려보내" in t for _, t, _ in notifier.sent)
 
@@ -213,7 +344,7 @@ def test_consult_subset(make_lab):
     s["linguist"] = [memo_turn(), memo_turn()]
     lab, _ = make_lab(s)
     exp = submit(lab, consult=["linguist"])
-    lab.process_one()
+    approve_plan_and_finish(lab, exp)
     d = lab.cfg.experiments_dir / exp["id"]
     assert lab.ledger.get(exp["id"])["status"] == "done"
     assert (d / "notes/consult_linguist.md").exists() and not (d / "notes/consult_lm.md").exists()
@@ -236,6 +367,7 @@ def test_toolbox_confines_paths_and_roles(make_lab):
         tb.execute("write_file", {"path": "../escape.txt", "content": "x"})
     assert tb.execute("write_file", {"path": "report/x.md", "content": "x"}).is_error       # 개발자는 report/ 쓰기 불가
     assert not tb.execute("write_file", {"path": "code/a.py", "content": "x"}).is_error
+    assert _tb(lab, eid, "practitioner").execute("write_file", {"path": "code/a.py", "content": "x"}).is_error
     assert _tb(lab, eid, "tester").execute("write_file", {"path": "code/a.py", "content": "x"}).is_error
     assert _tb(lab, eid, "documenter").execute("write_file", {"path": "results/fake.json", "content": "{}"}).is_error
     assert _tb(lab, eid, "linguist").execute("finish_report", {}).is_error                    # 역할 밖 도구

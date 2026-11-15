@@ -1,0 +1,93 @@
+{
+ "n_rows": 960,
+ "n_unparsable": 0,
+ "n_subjects": 24,
+ "conditions": [
+  "A",
+  "B"
+ ],
+ "n_duplicate_keys": 0,
+ "trials_per_subject_condition": [
+  20
+ ],
+ "n_items_per_condition": {
+  "A": 20,
+  "B": 20
+ },
+ "missing_subject_condition_cells": [],
+ "rt_min": 150.0,
+ "rt_max": 902.0,
+ "n_rt_eq_min": 19,
+ "n_rt_eq_min_by_cond": {
+  "A": 12,
+  "B": 7
+ },
+ "n_rt_lt_200": 52,
+ "n_rt_gt_2000": 0,
+ "trial_mean": {
+  "A": 402.681,
+  "B": 442.044
+ },
+ "mean_of_subject_means": {
+  "A": 402.681,
+  "B": 442.044
+ },
+ "paired_n": 24,
+ "diff_B_minus_A": 39.363,
+ "sd_diff": 56.077,
+ "t": 3.439,
+ "df": 23,
+ "cohen_dz": 0.702,
+ "p_two_sided": 0.002237649310584609,
+ "ci95_t": [
+  15.683,
+  63.042
+ ],
+ "wilcoxon_p": 0.0020009279251098633,
+ "boot_ci95_subjects": [
+  17.423,
+  61.019
+ ],
+ "n_subjects_B_slower": 20,
+ "n_subjects_B_faster_or_equal": 4,
+ "subjects_B_not_slower": [
+  "S01",
+  "S04",
+  "S18",
+  "S24"
+ ],
+ "per_subject_diff": {
+  "S01": -70.15,
+  "S02": 62.2,
+  "S03": 122.7,
+  "S04": -7.15,
+  "S05": 38.15,
+  "S06": 122.1,
+  "S07": 8.85,
+  "S08": 26.05,
+  "S09": 5.9,
+  "S10": 76.3,
+  "S11": 71.7,
+  "S12": 61.2,
+  "S13": 42.25,
+  "S14": 26.75,
+  "S15": 42.6,
+  "S16": 8.6,
+  "S17": 62.95,
+  "S18": -59.5,
+  "S19": 155.75,
+  "S20": 61.7,
+  "S21": 35.75,
+  "S22": 0.75,
+  "S23": 99.8,
+  "S24": -50.55
+ },
+ "by_item_n": 20,
+ "by_item_diff": 39.362,
+ "by_item_t": 6.533,
+ "n_items_B_slower": 18,
+ "mixed_cB_coef": 39.362,
+ "mixed_cB_se": 7.55,
+ "mixed_cB_z": 5.214,
+ "mixed_note": "subject, item 무선절편 교차 (기울기 없음)"
+}

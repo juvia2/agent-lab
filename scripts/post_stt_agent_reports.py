@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 
 from report_test_results import call, load_env
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from lab.config import Config
+from lab.policy import load_policy
 OUT = ROOT / "docs" / "stt_agent_eval"
 MARKER = "[한국어 STT 학습·테스트 2026-11-07]"
 TOKENS = {"director": "DISCORD_TOKEN", "linguist": "BOT_TOKEN_LINGUIST", "cogsci": "BOT_TOKEN_COGSCI", "lm": "BOT_TOKEN_LM", "statistician": "BOT_TOKEN_STATISTICIAN", "corpus": "BOT_TOKEN_CORPUS", "practitioner": "BOT_TOKEN_PRACTITIONER", "developer": "BOT_TOKEN_DEVELOPER", "documenter": "BOT_TOKEN_DOCUMENTER", "tester": "BOT_TOKEN_TESTER"}
 
 
 def main() -> None:
+    if not load_policy(Config.from_env(), "INTAKE").allows_discord:
+        raise SystemExit("STT 평가 결과의 디스코드 게시가 자료 정책상 차단됐습니다.")
     env = load_env()
     data = json.loads((OUT / "raw_responses.json").read_text(encoding="utf-8"))
     token = env["DISCORD_TOKEN"]

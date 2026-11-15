@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import logging
 import sys
 import threading
@@ -52,7 +53,7 @@ def run_check(cfg: Config, router) -> int:
         for name, model in route:
             used.setdefault(name, model)
     usable: dict[str, bool] = {}
-    for name in ("claude", "codex", "gemini", "local", "api"):
+    for name in ("claude", "codex", "gemini", "local", "api", "hermes"):
         if name not in used:
             continue
         hint = {"claude": "터미널에서 `claude` 를 한 번 실행해 로그인하세요(Claude 구독). 설치: npm i -g @anthropic-ai/claude-code",
@@ -60,7 +61,8 @@ def run_check(cfg: Config, router) -> int:
                 "gemini": "`gemini` 를 실행해 Google 로그인. 설치: npm i -g @google/gemini-cli",
                 "local": "Ollama 실행(`ollama serve`) 후 `ollama pull <모델>` 하고 .env 의 LOCAL_MODEL 을 맞추세요. "
                          "컨텍스트가 짧으면 `OLLAMA_CONTEXT_LENGTH=32768` 도 설정",
-                "api": "ANTHROPIC_API_KEY (토큰 과금 경로)"}[name]
+                "api": "ANTHROPIC_API_KEY (토큰 과금 경로)",
+                "hermes": "HERMES_PROFILE 전용 프로필에 로그인하고 HERMES_PROVIDER를 명시하세요"}[name]
         ok, msg = router.probe(name, used[name] if name != "local" else None)
         usable[name] = ok
         if ok:
@@ -87,7 +89,10 @@ def run_check(cfg: Config, router) -> int:
             asyncio.run(_login())
             line(True, "디스코드 봇 토큰 유효")
         except Exception as e:
-            line(False, f"디스코드 봇 토큰 오류 ({type(e).__name__})", "Developer Portal 에서 토큰을 다시 발급해 .env 에 넣으세요")
+            cert = "Certificate" in type(e).__name__
+            line(False, f"디스코드 {'인증서 오류(토큰 문제 아님)' if cert else '봇 토큰 오류'} ({type(e).__name__})",
+                 "SSL_CERT_FILE=$(.venv/bin/python -m certifi) 를 앞에 붙여 다시 실행" if cert
+                 else "Developer Portal 에서 토큰을 다시 발급해 .env 에 넣으세요")
     else:
         line(False, "DISCORD_TOKEN 설정", "Developer Portal → Bot → Reset Token")
     # --- 팀원 봇 (선택: 토큰이 없는 팀원은 건너뛰고 연구실장 봇만으로도 동작) ---
@@ -169,6 +174,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true", help="환경 점검 후 종료")
     args = ap.parse_args(argv)
     load_dotenv(ROOT / ".env")
+    if not os.environ.get("SSL_CERT_FILE"):
+        # 터미널에서 직접 실행하면 맥의 파이썬이 인증서 묶음을 못 찾아 디스코드 접속이 인증서 오류로 실패한다(launchd 서비스는 plist 에 구워져 있음).
+        try:
+            import certifi
+            os.environ["SSL_CERT_FILE"] = os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+        except ImportError:
+            pass
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = Config.from_env()
     cfg.ensure_dirs()
@@ -194,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
     bot = LabBot(cfg, lab, Director(lab), notifier, stop, startup_note=_docker_note(cfg),
                  members=members, registry=registry)
     notifier.bot = bot
+    from .console import start_in_background
+    start_in_background(cfg)                  # 관제 화면(로컬 전용). CONSOLE_PORT=0 이면 끔
     try:
         bot.run(cfg.discord_token, log_handler=None)
     finally:

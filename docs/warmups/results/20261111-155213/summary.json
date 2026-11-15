@@ -1,0 +1,36 @@
+{
+  "started": "2026-11-11 15:52:13",
+  "path": "run_warmups.py (디스코드 미경유, #의뢰와 같은 프롬프트·도구·모델 경로)",
+  "sandbox_backend": "docker",
+  "docker_ready": true,
+  "items": {
+    "07": {
+      "role": "developer",
+      "status": "responded",
+      "turns": 3,
+      "runs": 1,
+      "tools": [
+        "read_file",
+        "write_file",
+        "write_file",
+        "run_command",
+        "attach_file",
+        "attach_file",
+        "attach_file"
+      ],
+      "attached": [
+        "surprisal_utils.py",
+        "test_surprisal_utils.py",
+        "execution.log"
+      ],
+      "learned": [],
+      "work_dir": "/Users/ju/research-lab/workspace/adhoc/2026-11-11/developer",
+      "seconds": 79.8,
+      "usage_so_far": "codex: 3회·141,613토큰"
+    }
+  },
+  "finished": "2026-11-11 15:53:33",
+  "grading": {
+    "07": "합격"
+  }
+}

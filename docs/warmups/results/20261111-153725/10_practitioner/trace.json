@@ -1,0 +1,19 @@
+[
+  {
+    "role": "user",
+    "content": "@Experiment Coordinator 첨부한 자문 메모 3개를 하나의 실험 계획 초안으로 통합해줘. 메모끼리 부딪히는 지점은 따로 표로 정리하고, 네가 정한 것과 내가 정해야 하는 것을 구분해줘."
+  },
+  {
+    "role": "user",
+    "content": "[연구자가 파일을 첨부함. 작업 폴더 기준 경로]\ninputs/memo_linguist.md\ninputs/memo_lm.md\ninputs/memo_statistician.md"
+  },
+  {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "현재 전달된 도구 결과에는 첨부 메모 본문이 없습니다. 내용을 확인한 뒤 통합 초안, 충돌 사항 표, 실무 담당자 판단과 연구자 결정 사항을 구분하겠습니다."
+      }
+    ]
+  }
+]

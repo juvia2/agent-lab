@@ -1,0 +1,109 @@
+{
+  "started": "2026-11-11 13:57:09",
+  "path": "run_warmups.py (디스코드 미경유, #의뢰와 같은 프롬프트·도구·모델 경로)",
+  "sandbox_backend": "docker",
+  "docker_ready": true,
+  "items": {
+    "01": {
+      "role": "director",
+      "status": "responded",
+      "routes": [
+        "corpus",
+        "statistician",
+        "experiment",
+        "ask",
+        "linguist"
+      ],
+      "seconds": 13.6,
+      "usage_so_far": "claude: 5회·11,050토큰"
+    },
+    "05": {
+      "role": "statistician",
+      "status": "responded",
+      "turns": 3,
+      "runs": 1,
+      "tools": [
+        "write_file",
+        "run_command",
+        "attach_file",
+        "attach_file"
+      ],
+      "attached": [
+        "power_sim_2x2_within.py",
+        "power_sim_output.txt"
+      ],
+      "learned": [],
+      "work_dir": "/Users/ju/research-lab/workspace/adhoc/2026-11-11/statistician",
+      "seconds": 55.0,
+      "usage_so_far": "claude: 8회·35,419토큰"
+    },
+    "08": {
+      "role": "documenter",
+      "status": "responded",
+      "turns": 2,
+      "runs": 0,
+      "tools": [
+        "read_file"
+      ],
+      "attached": [],
+      "learned": [],
+      "work_dir": "/Users/ju/research-lab/workspace/adhoc/2026-11-11/documenter",
+      "seconds": 18.4,
+      "usage_so_far": "claude: 10회·47,289토큰"
+    },
+    "10": {
+      "role": "practitioner",
+      "status": "responded",
+      "turns": 1,
+      "runs": 0,
+      "tools": [],
+      "attached": [],
+      "learned": [],
+      "work_dir": "/Users/ju/research-lab/workspace/adhoc/2026-11-11/practitioner",
+      "seconds": 26.1,
+      "usage_so_far": "claude: 10회·47,289토큰 / hermes: 1회·30,499토큰"
+    },
+    "02": {
+      "role": "linguist",
+      "status": "responded",
+      "turns": 2,
+      "runs": 0,
+      "tools": [
+        "write_file",
+        "attach_file"
+      ],
+      "attached": [
+        "npi_minimal_pairs.csv"
+      ],
+      "learned": [],
+      "work_dir": "/Users/ju/research-lab/workspace/adhoc/2026-11-11/linguist",
+      "seconds": 60.9,
+      "usage_so_far": "claude: 12회·63,956토큰 / hermes: 1회·30,499토큰"
+    },
+    "03": {
+      "role": "cogsci",
+      "status": "responded",
+      "turns": 1,
+      "runs": 0,
+      "tools": [],
+      "attached": [],
+      "learned": [],
+      "work_dir": "/Users/ju/research-lab/workspace/adhoc/2026-11-11/cogsci",
+      "seconds": 25.6,
+      "usage_so_far": "claude: 13회·74,483토큰 / hermes: 1회·30,499토큰"
+    },
+    "04": {
+      "role": "lm",
+      "status": "responded",
+      "turns": 1,
+      "runs": 0,
+      "tools": [],
+      "attached": [],
+      "learned": [],
+      "work_dir": "/Users/ju/research-lab/workspace/adhoc/2026-11-11/lm",
+      "seconds": 59.5,
+      "usage_so_far": "claude: 14회·89,400토큰 / hermes: 1회·30,499토큰"
+    }
+  },
+  "finished": "2026-11-11 14:01:28"
+}

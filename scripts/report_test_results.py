@@ -21,6 +21,9 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from lab.config import Config
+from lab.policy import load_policy
 RESULTS = ROOT / "docs" / "agent_tests"
 API = "https://discord.com/api/v10"
 DRY = "--dry-run" in sys.argv
@@ -162,6 +165,8 @@ def summary_embed() -> dict:
 
 
 def main():
+    if not load_policy(Config.from_env(), "INTAKE").allows_discord:
+        raise SystemExit("평가 결과의 디스코드 게시가 자료 정책상 차단됐습니다.")
     rows = []
     # 1) 서버·채널 확인에 쓸 토큰: 연구실장 → 안 되면 로그인되는 첫 팀원
     dtok, me, guilds, director_err = None, None, None, None

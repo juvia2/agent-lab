@@ -11,6 +11,8 @@ from pathlib import Path
 
 from lab.agents import ROLE_META, director_system, stt_knowledge, system_for
 from lab.backends import CLIBackend
+from lab.config import Config
+from lab.policy import load_policy
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "stt_agent_eval"
@@ -29,6 +31,8 @@ QUESTIONS = {
 
 
 def main() -> None:
+    if not load_policy(Config.from_env(), "INTAKE").allows_backend("codex"):
+        raise SystemExit("STT 평가 문서를 외부 모델에 보내려면 INTAKE 정책에 codex를 명시해야 합니다.")
     OUT.mkdir(parents=True, exist_ok=True)
     backend = CLIBackend("codex", "codex", 180)
     result_path = OUT / "raw_responses.json"

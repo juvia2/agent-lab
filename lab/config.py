@@ -34,6 +34,9 @@ def load_routes() -> dict:
     out = {}
     for role, spec in DEFAULT_ROUTES.items():
         out[role] = parse_route(os.environ.get(f"ROUTE_{role.upper()}", spec))
+        if any(name == "hermes" for name, _ in out[role]):
+            if role != "practitioner" or len(out[role]) != 1:
+                raise ValueError("Hermes는 ROUTE_PRACTITIONER=hermes 단독 경로에서만 허용됩니다")
     return out
 
 
@@ -59,6 +62,10 @@ class Config:
     report_channel: str
     perf_channel: str             # 에이전트 성능 향상(학습·테스트) 리포트 전용. 연구 진행 채널과 분리
     test_channel: str             # 봇 접속·권한·개발 점검 전용
+    adhoc_channel: str            # 실험과 무관한 단건 의뢰(담당자에게 직접 질의·잡무)
+    adhoc_timeout_min: int        # 의뢰 1건의 명령 실행 상한(분). 넘는 일은 #실험요청으로
+    adhoc_read_dirs: tuple        # 의뢰에서 읽기 전용으로 열람 가능한 맥 폴더(쉼표 구분 .env ADHOC_READ_DIRS)
+    learn_threshold: int          # 같은 학습 후보가 이 횟수만큼 쌓이면 연구자 확인 요청
     model_director: str
     model_thinker: str
     model_runner: str
@@ -76,6 +83,9 @@ class Config:
     claude_bin: str
     codex_bin: str
     gemini_bin: str
+    hermes_bin: str
+    hermes_profile: str
+    hermes_provider: str
     cli_timeout_min: int          # CLI 1회 호출 상한
     keep_api_keys: bool           # False 면 CLI 호출 때 *_API_KEY 환경변수를 지워 구독 로그인만 쓰게 한다
     local_base_url: str
@@ -96,6 +106,11 @@ class Config:
             report_channel=e("REPORT_CHANNEL", "results-산출물"),
             perf_channel=e("PERF_CHANNEL", "성능고도화"),
             test_channel=e("TEST_CHANNEL", "봇점검"),
+            adhoc_channel=e("ADHOC_CHANNEL", "의뢰"),
+            adhoc_timeout_min=_int("ADHOC_TIMEOUT_MIN", 10) or 10,
+            adhoc_read_dirs=tuple(Path(x.strip()).expanduser().resolve()
+                                  for x in e("ADHOC_READ_DIRS", "").split(",") if x.strip()),
+            learn_threshold=_int("LEARN_THRESHOLD", 3) or 3,
             model_director=e("MODEL_DIRECTOR", "claude-sonnet-5-5"),
             model_thinker=e("MODEL_THINKER", "claude-opus-5-5"),
             model_runner=e("MODEL_RUNNER", "claude-sonnet-5-5"),
@@ -113,6 +128,9 @@ class Config:
             claude_bin=e("CLAUDE_BIN", "claude"),
             codex_bin=e("CODEX_BIN", "codex"),
             gemini_bin=e("GEMINI_BIN", "gemini"),
+            hermes_bin=e("HERMES_BIN", str(Path.home() / ".local/bin/hermes")),
+            hermes_profile=e("HERMES_PROFILE", "research-lab-coordinator"),
+            hermes_provider=e("HERMES_PROVIDER", ""),
             cli_timeout_min=_int("CLI_TIMEOUT_MIN", 20) or 20,
             keep_api_keys=e("KEEP_API_KEYS", "0") == "1",
             local_base_url=e("LOCAL_BASE_URL", "http://localhost:11434/v1"),
@@ -138,9 +156,22 @@ class Config:
         return self.lab_home / "hf_cache"
 
     @property
+    def adhoc_dir(self) -> Path:
+        return self.lab_home / "adhoc"
+
+    @property
+    def learning_dir(self) -> Path:
+        return self.lab_home / "learning"
+
+    @property
+    def memory_dir(self) -> Path:
+        return self.lab_home / "memory"
+
+    @property
     def ledger_path(self) -> Path:
         return self.lab_home / "ledger.db"
 
     def ensure_dirs(self) -> None:
-        for d in (self.experiments_dir, self.notebook_dir, self.data_dir, self.hf_cache_dir):
+        for d in (self.experiments_dir, self.notebook_dir, self.data_dir, self.hf_cache_dir,
+                  self.adhoc_dir, self.learning_dir, self.memory_dir):
             d.mkdir(parents=True, exist_ok=True)
