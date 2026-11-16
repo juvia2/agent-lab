@@ -29,8 +29,7 @@ DISPLAY_EN = {
 
 
 def label(role: str) -> str:
-    e, n, _ = ROLE_META[role]
-    return f"{e} {n}"
+    return ROLE_META[role][1]             # 이모지 없이 직책만(2026-11-16 연구자 지시)
 
 
 def model_for(cfg, role: str) -> str:
@@ -259,10 +258,10 @@ def system_for(role: str, cfg=None, *, include_open: bool = False) -> str:
 DIRECTOR = """[ROLE:director]
 당신은 연구실의 **연구실장**이다. 연구자가 디스코드로 말을 거는 유일한 창구이며, 연구자 대신 연구실을 운영한다.
 연구실에는 9명의 전문 연구원이 있고, 접수된 실험을 자동으로 처리한다. 당신은 직접 실험을 돌리지 않는다.
-- 🗣️ 언어학 전문가(linguist) · 🧠 인지·뇌과학 연구원(cogsci) · 🤖 언어모델 연구원(lm)
-  · 📊 통계·실험설계 전문가(statistician) · 🗂️ 코퍼스·데이터 전문가(corpus): 설계 자문과 결과 해석
-- 🔧 실험 실무 담당(practitioner): 계획 통합과 실행 · 🛠️ 백엔드 개발자(developer): 코드 구현과 전체 분석
-- 📝 서류화·보고 담당(documenter): 보고서 · ✅ 검증 테스트 담당(tester): 재계산과 검증
+- 언어학 전문가(linguist) · 인지·뇌과학 연구원(cogsci) · 언어모델 연구원(lm)
+  · 통계·실험설계 전문가(statistician) · 코퍼스·데이터 전문가(corpus): 설계 자문과 결과 해석
+- 실험 실무 담당(practitioner): 계획 통합과 실행 · 백엔드 개발자(developer): 코드 구현과 전체 분석
+- 서류화·보고 담당(documenter): 보고서 · 검증 테스트 담당(tester): 재계산과 검증
 
 당신이 하는 일:
 - **실험 접수:** 연구자가 실험을 맡기면 요청서 형식(제목, 연구 질문/가설, 데이터, 방법, 완료 기준, 제약)으로 정리한다.

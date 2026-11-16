@@ -1,6 +1,7 @@
 """연구실장: 디스코드 대화를 받아 요청서를 접수하고, 진행 상황 질의에 답한다."""
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
@@ -8,8 +9,10 @@ from .agents import DISPLAY_EN, director_system
 from . import memory
 from .llm import NoBackend, ToolOutput, run_agent
 from .pipeline import STATUS_LABEL, Lab
-from .policy import load_policy
+from .policy import inherit_policy, load_policy
 from .tools import CONSULTANTS
+
+log = logging.getLogger("lab.director")
 
 _PATH = {"type": "string", "description": "실험 폴더 기준 상대경로"}
 _ID = {"type": "string", "description": "예: EXP-003"}
@@ -159,7 +162,15 @@ class Director:
                     return ToolOutput(f"한 번에 {MAX_PASS}명까지만 넘길 수 있습니다", is_error=True)
                 handoffs.append((role, q))
                 return ToolOutput(f"{DISPLAY_EN[role]} 에게 넘김. 그 팀원이 이 채널에 직접 답한다. 당신은 넘긴 사실만 한 줄로 알릴 것.")
-            return self._tool(name, a, thread_id, channel_id, requester_id)
+            out = self._tool(name, a, thread_id, channel_id, requester_id)
+            if name == "submit_experiment" and requester_id is not None and not out.is_error:
+                # 연구자가 이 채널에서 맡긴 실험은 채널 정책을 물려받는다. 안 그러면 로컬 전용으로 시작해 바로 멈추고,
+                # 접수·진행 알림도 디스코드에 못 올라간다.
+                m = re.search(r"EXP-\d+", out.text)
+                src = policy_id if policy_id in ("INTAKE", "ADHOC") else "INTAKE"
+                if m and inherit_policy(self.cfg, m.group(0), src):
+                    log.info("%s 정책을 %s 에서 물려받음", m.group(0), src)
+            return out
 
         try:
             res = run_agent(self.lab.client, model=self.cfg.model_director,
@@ -197,7 +208,7 @@ class Director:
             import time
             with (self.cfg.lab_home / "ops_requests.md").open("a", encoding="utf-8") as fh:
                 fh.write(f"- [ ] {time.strftime('%Y-%m-%d %H:%M')} {text[:1000]}\n")
-            return ToolOutput("운영 요청으로 기록됨(workspace/ops_requests.md). 연구자에게 \"📌 운영 요청으로 기록했습니다. "
+            return ToolOutput("운영 요청으로 기록됨(workspace/ops_requests.md). 연구자에게 \"운영 요청으로 기록했습니다. "
                               "코드 수정이 필요한 일이라 다음 코드 작업 세션에서 반영됩니다\" 라고 알릴 것. 이미 반영된 것처럼 말하지 않는다.")
         if name == "lab_status":
             return ToolOutput(lab.status_text())
@@ -260,7 +271,7 @@ class Director:
                     return ToolOutput("이 기록의 디스코드 전송은 허용되지 않았습니다.", is_error=True)
                 return ToolOutput(text)
             item = memory.propose_decision(self.cfg, a["text"], exp_id=a.get("exp_id"), basis=a.get("basis", ""))
-            return ToolOutput(f"제안 기록됨: {item['id']} (확인 대기). 답변에 \"📝 결정 기록 제안 {item['id']} — "
+            return ToolOutput(f"제안 기록됨: {item['id']} (확인 대기). 답변에 \"결정 기록 제안 {item['id']} — "
                               f"`/memory approve {item['id']}` 로 확정\" 이라고 알릴 것.")
         except (PermissionError, FileNotFoundError, ValueError, KeyError) as e:
             return ToolOutput(f"오류: {e}", is_error=True)

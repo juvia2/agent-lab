@@ -80,3 +80,12 @@ def test_pipeline_progress_posted_as_roles(make_lab):
     assert set(CONSULTANTS) <= roles                                    # 자문·해석 메모는 각 전문가 이름으로
     assert {"practitioner", "developer", "documenter", "tester"} <= roles
     assert None in notifier.roles                                       # 접수·완료 같은 공지는 연구실장
+
+
+def test_discord_text_has_no_emoji():
+    """연구자 지시(2026-11-16): 디스코드에 올라가는 글에 이모지를 쓰지 않는다. 모델이 써도 보내기 전에 지운다."""
+    from lab.agents import label
+    from lab.bot import chunks, strip_emoji
+    assert label("linguist") == "언어학 전문가"
+    assert chunks("🧭 설계 자문 시작: 🗣️ 언어학 전문가 ✅ 완료 → 다음") == ["설계 자문 시작: 언어학 전문가 완료 → 다음"]
+    assert strip_emoji("👩‍💻 개발 ↩️ 수정") == "개발 수정"

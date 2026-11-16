@@ -23,13 +23,13 @@ log = logging.getLogger("lab.main")
 
 def _docker_note(cfg: Config) -> str:
     if cfg.sandbox_backend != "docker":
-        return "⚠️ 샌드박스가 `host` 모드입니다(격리 없음)."
+        return "샌드박스가 `host` 모드입니다(격리 없음)."
     if docker_ready():
         return ""
     log.warning("도커가 꺼져 있어 colima 시작을 시도합니다")
     if try_start_colima():
-        return "ℹ️ 도커(colima)를 자동으로 시작했습니다."
-    return "⚠️ 도커를 사용할 수 없습니다. `colima start` 후 실험이 재시도됩니다(코드 실행 단계에서 막힙니다)."
+        return "도커(colima)를 자동으로 시작했습니다."
+    return "도커를 사용할 수 없습니다. `colima start` 후 실험이 재시도됩니다(코드 실행 단계에서 막힙니다)."
 
 
 ROLE_NAMES = ('director', 'linguist', 'cogsci', 'lm', 'statistician', 'corpus', 'developer', 'practitioner', 'documenter', 'tester')
@@ -45,7 +45,7 @@ def run_check(cfg: Config, router) -> int:
     def line(ok: bool, msg: str, hint: str = "") -> None:
         nonlocal bad
         bad += 0 if ok else 1
-        print(("✅ " if ok else "❌ ") + msg + (f"\n    → {hint}" if hint and not ok else ""))
+        print(("[OK] " if ok else "[실패] ") + msg + (f"\n    → {hint}" if hint and not ok else ""))
 
     # --- 모델 백엔드: 실제로 한 번씩 불러 본다(구독 CLI는 로그인 상태까지 확인된다) ---
     used = {}
@@ -66,9 +66,9 @@ def run_check(cfg: Config, router) -> int:
         ok, msg = router.probe(name, used[name] if name != "local" else None)
         usable[name] = ok
         if ok:
-            print(f"✅ 모델 백엔드 {name} 사용 가능 ({msg})")
+            print(f"[OK] 모델 백엔드 {name} 사용 가능 ({msg})")
         else:
-            print(f"⚠️  모델 백엔드 {name} 사용 불가: {msg}\n    → {hint}")
+            print(f"[주의] 모델 백엔드 {name} 사용 불가: {msg}\n    → {hint}")
     for role, route in cfg.routes.items():
         if role == "default" and role not in ROLE_NAMES:
             continue
@@ -77,7 +77,7 @@ def run_check(cfg: Config, router) -> int:
         line(bool(live), f"{role:<12} 경로 {' → '.join(names)}  (현재 사용 가능: {', '.join(live) or '없음'})",
              "이 역할에 쓸 수 있는 백엔드가 없습니다. 위 안내대로 로그인/설치하거나 .env 의 ROUTE_* 를 바꾸세요")
     if cfg.anthropic_api_key and not cfg.keep_api_keys:
-        print("ℹ️  ANTHROPIC_API_KEY 가 있지만 기본 경로에는 쓰이지 않습니다(CLI 호출 때도 지웁니다). 과금 없음.")
+        print("[참고] ANTHROPIC_API_KEY 가 있지만 기본 경로에는 쓰이지 않습니다(CLI 호출 때도 지웁니다). 과금 없음.")
     line(bool(cfg.discord_owner_id), "DISCORD_OWNER_ID 설정", "디스코드 설정 → 고급 → 개발자 모드 → 내 프로필 우클릭 → ID 복사")
     if cfg.discord_token:
         async def _login():
@@ -117,7 +117,7 @@ def run_check(cfg: Config, router) -> int:
             line(False, f"팀원 봇 {DISPLAY_EN[role]} 토큰 오류 ({type(e).__name__})",
                  f"Developer Portal 에서 다시 발급해 `python3 scripts/add_bot_tokens.py --all` 로 넣으세요")
     if missing:
-        print(f"ℹ️  팀원 봇 토큰 없음({len(missing)}명, 연구실장 봇이 대신 알림): {', '.join(missing)}\n"
+        print(f"[참고] 팀원 봇 토큰 없음({len(missing)}명, 연구실장 봇이 대신 알림): {', '.join(missing)}\n"
               f"    → `python3 scripts/add_bot_tokens.py` 로 등록")
     if cfg.sandbox_backend == "docker":
         ready = docker_ready()

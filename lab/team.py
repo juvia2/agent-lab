@@ -224,7 +224,7 @@ class MemberBot(discord.Client):
                 trace.emit("done", src=self.role, ok=True)
             except Exception as e:
                 log.exception("[%s] 대화 처리 오류", self.role)
-                reply = f"⚠️ 처리 중 오류가 났습니다: {type(e).__name__}: {str(e)[:300]}"
+                reply = f"처리 중 오류가 났습니다: {type(e).__name__}: {str(e)[:300]}"
         from .bot import chunks
         for i, part in enumerate(chunks(self.registry.linkify(reply))):
             if i == 0:
@@ -277,7 +277,7 @@ class MemberBot(discord.Client):
             except Exception as e:
                 ok = False
                 log.exception("[%s] 의뢰 처리 오류", self.role)
-                reply = f"⚠️ 처리 중 오류가 났습니다: {type(e).__name__}: {str(e)[:300]}"
+                reply = f"처리 중 오류가 났습니다: {type(e).__name__}: {str(e)[:300]}"
             box.finish_log(forwarded or message.content or "", ok)
             if ok:                                # 장기 기억: 넘겨받은 본문은 앞에 붙인 최근 대화를 떼고 의뢰만 남긴다
                 asked = (forwarded or "").split("[지금 의뢰]\n", 1)[-1] if forwarded else \
@@ -319,7 +319,7 @@ class MemberBot(discord.Client):
         bot, prefix = (self if speaker == self.role else self.peers.get(speaker)), ""
         if bot is None or not bot.is_ready():     # 그 동료 봇이 없으면 내가 대신 이름을 붙여 올린다
             bot, prefix = self, f"**[{DISPLAY_EN.get(speaker, speaker)}]** "
-        icon = "↪️" if ev["type"] == "call" else "↩️"
+        icon = "질문 →" if ev["type"] == "call" else "답 →"
         text = f"{prefix}{icon} @{DISPLAY_EN.get(ev.get('dst'), '?')} {ev.get('text', '')}"
         try:
             ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
@@ -353,7 +353,7 @@ class MemberBot(discord.Client):
             except Exception as e:
                 ok = False
                 log.exception("[%s] 넘겨받은 일 처리 오류", self.role)
-                reply = f"⚠️ 처리 중 오류가 났습니다: {type(e).__name__}: {str(e)[:300]}"
+                reply = f"처리 중 오류가 났습니다: {type(e).__name__}: {str(e)[:300]}"
         trace.emit("done", src=self.role, ok=ok)
         for part in chunks(self.registry.linkify(reply)):
             await ch.send(part)
@@ -403,7 +403,7 @@ class MemberBot(discord.Client):
 
     # ---- 답변 생성 (워커 스레드) ----
     def system_prompt(self, ctx: str | None, *, adhoc_mode: bool = False) -> str:
-        roster = ", ".join(f"@{DISPLAY_EN[r]}({label(r) if r != 'director' else '🧑‍💼 연구실장'})"
+        roster = ", ".join(f"@{DISPLAY_EN[r]}({label(r) if r != 'director' else '연구실장'})"
                            for r in DISPLAY_EN if r != self.role)
         if adhoc_mode:
             s = (system_for(self.role, self.cfg, include_open=True)

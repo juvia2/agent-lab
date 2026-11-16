@@ -145,7 +145,7 @@ def approve(cfg, cid: str) -> str:
         _save(pf, prof)
         _save(cf, cands)
     log_event(cfg, {"type": "approve", "id": cid, "profile_id": pid})
-    return f"✅ {cid} → {pid} 로 반영했습니다: {c['text']}"
+    return f"{cid} → {pid} 로 반영했습니다: {c['text']}"
 
 
 def reject(cfg, cid: str) -> str:
@@ -158,7 +158,7 @@ def reject(cfg, cid: str) -> str:
         c["status"], c["updated"] = "rejected", _now()     # 다시 관찰돼도 무시
         _save(cf, cands)
     log_event(cfg, {"type": "reject", "id": cid})
-    return f"🚫 {cid} 는 반영하지 않습니다(이후 같은 관찰도 무시): {c['text']}"
+    return f"{cid} 는 반영하지 않습니다(이후 같은 관찰도 무시): {c['text']}"
 
 
 def forget(cfg, pid: str) -> str:
@@ -172,7 +172,7 @@ def forget(cfg, pid: str) -> str:
         prof["items"] = keep
         _save(pf, prof)
     log_event(cfg, {"type": "forget", "id": pid})
-    return f"🗑️ {pid} 를 지웠습니다(다음 답변부터 미적용): {gone['text']}"
+    return f"{pid} 를 지웠습니다(다음 답변부터 미적용): {gone['text']}"
 
 
 def profile_items(cfg, role: str | None = None) -> list[dict]:
@@ -203,7 +203,7 @@ def due_notice(cfg, ids: list[str] | None = None) -> str:
     rows = [c for c in due(cfg) if ids is None or c["id"] in ids]
     if not rows:
         return ""
-    return "\n".join(["💡 **학습 후보 확인 요청** — 같은 패턴이 반복 관찰됐습니다. 기본으로 반영할까요?"] +
+    return "\n".join(["**학습 후보 확인 요청** — 같은 패턴이 반복 관찰됐습니다. 기본으로 반영할까요?"] +
                      [f"• `{c['id']}` ({c['count']}회) {c['text']}" for c in rows] +
                      ["→ `/learn approve L-###` 또는 `/learn reject L-###`"])
 

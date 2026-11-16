@@ -25,9 +25,9 @@ from .tools import CONSULTANTS, ROLE_TOOLS, Toolbox, tool_schemas
 
 log = logging.getLogger("lab")
 
-STATUS_LABEL = {"queued": "⏳ 대기", "planning": "🧭 설계 중", "awaiting_approval": "🔐 승인 대기",
-                "running": "🔬 실행 중", "analyzing": "📊 분석 중", "done": "✅ 완료",
-                "failed": "❌ 실패", "stopped": "⏹ 중단", "paused": "⏸ 일시정지"}
+STATUS_LABEL = {"queued": "대기", "planning": "설계 중", "awaiting_approval": "승인 대기",
+                "running": "실행 중", "analyzing": "분석 중", "done": "완료",
+                "failed": "실패", "stopped": "중단", "paused": "일시정지"}
 PHASE_LABEL = {"consult": "전문가 자문", "plan": "계획 통합", "build": "코드 구현", "execute": "실험 실행",
                "analyze": "전체 분석", "interpret": "전문가 해석", "report": "보고서·검증"}
 MAX_REVIEW_ROUNDS = 3        # 초안 1회 + 수정 2회
@@ -79,7 +79,7 @@ class Lab:
             shutil.copy(src, d / "code" / "lab_utils.py")
         exp = self.ledger.get(eid)
         ahead = len([e for e in self.ledger.list("queued") if e["id"] != eid])
-        self.notifier.post(exp, f"📥 **{eid}** 접수 — {title}\n"
+        self.notifier.post(exp, f"**{eid}** 접수 — {title}\n"
                                 f"자문: {', '.join(label(r) for r in consult)}\n"
                                 f"대기열 앞에 {ahead}건. 진행 상황은 이 스레드에 올라옵니다.")
         return exp
@@ -93,7 +93,7 @@ class Lab:
         self.ledger.update(exp["id"], status="stopped")
         self.sandbox.kill(exp["id"])
         self.ledger.add_event(exp["id"], "stopped", "연구자 요청으로 중단")
-        self.notifier.post(self.ledger.get(exp["id"]), f"⏹ {exp['id']} 중단했습니다. 이어서 하려면 `/resume {exp['id']}`")
+        self.notifier.post(self.ledger.get(exp["id"]), f"{exp['id']} 중단했습니다. 이어서 하려면 `/resume {exp['id']}`")
         return f"{exp['id']} 중단함."
 
     def resume(self, exp_id: str) -> str:
@@ -144,7 +144,7 @@ class Lab:
         self.ledger.update(exp["id"], meta_json=json.dumps(meta, ensure_ascii=False))
         self.ledger.update(exp["id"], approved=1, status="queued")
         self.ledger.add_event(exp["id"], "approved", "연구자 승인: " + (exp["approval_reasons"] or ""))
-        self.notifier.post(self.ledger.get(exp["id"]), f"🔓 {exp['id']} 승인되었습니다. 작업을 이어갑니다.")
+        self.notifier.post(self.ledger.get(exp["id"]), f"{exp['id']} 승인되었습니다. 작업을 이어갑니다.")
         return f"{exp['id']} 승인함."
 
     def reject(self, exp_id: str) -> str:
@@ -153,7 +153,7 @@ class Lab:
             return f"{exp_id}: 승인 대기 상태가 아닙니다."
         self.ledger.update(exp["id"], status="stopped")
         self.ledger.add_event(exp["id"], "rejected", "연구자가 승인 거부")
-        self.notifier.post(self.ledger.get(exp["id"]), f"🚫 {exp['id']} 승인이 거부되어 중단했습니다.")
+        self.notifier.post(self.ledger.get(exp["id"]), f"{exp['id']} 승인이 거부되어 중단했습니다.")
         return f"{exp['id']} 거부함."
 
     def set_priority(self, exp_id: str, priority: int) -> str:
@@ -170,7 +170,7 @@ class Lab:
             return "아직 접수된 실험이 없습니다."
         groups = [("진행 중", ("planning", "running", "analyzing")), ("승인 대기", ("awaiting_approval",)),
                   ("대기열", ("queued",)), ("멈춤/실패", ("paused", "failed", "stopped"))]
-        out = ["📊 **연구실 현황**"]
+        out = ["**연구실 현황**"]
         for name, sts in groups:
             rows = [e for e in exps if e["status"] in sts]
             if rows:
@@ -182,7 +182,7 @@ class Lab:
             out.append("\n**최근 완료**")
             out += [f"- {e['id']} {_short(e['title'], 40)}" for e in done]
         if hasattr(self.client, "usage_summary"):
-            out.append(f"\n🔀 모델 호출(가동 이후): {self.client.usage_summary()}")
+            out.append(f"\n모델 호출(가동 이후): {self.client.usage_summary()}")
         return "\n".join(out)
 
     def describe(self, exp_id: str) -> str:
@@ -257,19 +257,19 @@ class Lab:
         except BudgetExceeded:
             self.ledger.update(eid, status="paused", error="토큰 예산 초과")
             self.ledger.add_event(eid, "paused", "토큰 예산 초과로 일시정지")
-            self.notifier.post(self.ledger.get(eid), f"⏸ {eid}: 토큰 예산을 다 썼습니다. 예산을 더 주고 이어가려면 `/resume {eid}`")
+            self.notifier.post(self.ledger.get(eid), f"{eid}: 토큰 예산을 다 썼습니다. 예산을 더 주고 이어가려면 `/resume {eid}`")
         except NoBackend as e:
             self.ledger.update(eid, status="paused", error=_short(str(e), 900))
             self.ledger.add_event(eid, "paused", f"모델 백엔드 없음: {e}")
             self.notifier.post(self.ledger.get(eid),
-                               f"⏸ {eid}: 지금 쓸 수 있는 모델이 없어 일시정지했습니다.\n{_short(str(e), 700)}\n"
+                               f"{eid}: 지금 쓸 수 있는 모델이 없어 일시정지했습니다.\n{_short(str(e), 700)}\n"
                                f"한도가 풀리거나 로그인/서버를 고친 뒤 `/resume {eid}` 로 이어가세요.")
         except Exception as e:
             log.error("experiment %s failed:\n%s", eid, traceback.format_exc())
             self.ledger.update(eid, status="failed", error=f"{type(e).__name__}: {e}"[:1000])
             self.ledger.add_event(eid, "failed", f"{type(e).__name__}: {e}")
             self.notifier.post(self.ledger.get(eid),
-                               f"❌ {eid} 실패 ({PHASE_LABEL.get(cur['phase'], cur['phase'])} 단계)\n"
+                               f"{eid} 실패 ({PHASE_LABEL.get(cur['phase'], cur['phase'])} 단계)\n"
                                f"원인: {_short(str(e), 600)}\n이어서 하려면 `/resume {eid}`")
 
     # ================= 공통 도우미 =================
@@ -294,7 +294,7 @@ class Lab:
     def _fail(self, eid: str, text: str) -> bool:
         self.ledger.update(eid, status="failed", error=_short(text, 1000))
         self.ledger.add_event(eid, "failed", text)
-        self.notifier.post(self.ledger.get(eid), f"❌ {eid} 실패\n{_short(text, 1200)}\n이어서 하려면 `/resume {eid}`")
+        self.notifier.post(self.ledger.get(eid), f"{eid} 실패\n{_short(text, 1200)}\n이어서 하려면 `/resume {eid}`")
         return False
 
     def _meta(self, eid: str) -> dict:
@@ -392,19 +392,19 @@ class Lab:
         for role, m in memos.items():                     # 전문가마다 자기 이름으로 올린다
             lines = [f"{label(role)}: {_short(m.get('summary', ''), 300)}"]
             for c in m.get("key_concerns", [])[:3]:
-                lines.append(f"  ⚠️ {_short(c, 200)}")
+                lines.append(f"  {_short(c, 200)}")
             self._say(eid, "\n".join(lines), role=role)
 
     # ================= 단계 1: 전문가 자문 =================
     def _phase_consult(self, exp: dict) -> bool:
         eid = exp["id"]
         roles = self._meta(eid).get("consult") or list(CONSULTANTS)
-        self._say(eid, f"🧭 설계 자문 시작: {', '.join(label(r) for r in roles)}")
+        self._say(eid, f"설계 자문 시작: {', '.join(label(r) for r in roles)}")
         memos = self._memo_round(
             exp, roles, stage="consult(자문)", out_fmt="notes/consult_{role}.md",
             instruction="자문 단계다. request.md 와 관련 과거 실험을 검토하고, 당신의 전문 영역에서 실험 설계 전에 "
                         "바로잡아야 할 점과 권고를 `submit_memo`로 제출하세요.")
-        self._post_memos(eid, "🧭 자문 메모 도착", memos)
+        self._post_memos(eid, "자문 메모 도착", memos)
         self._advance(eid, "plan")
         return True
 
@@ -433,13 +433,13 @@ class Lab:
                        f"예상 {plan.get('est_runtime_min', '?')}분"
                        + (f" / 위험: {_short('; '.join(plan.get('risks', [])), 300)}" if plan.get("risks") else ""))
         if plan.get("needs_network") and self.cfg.network_policy == "deny":
-            self._say(eid, "ℹ️ 네트워크 정책이 deny 라서 네트워크 없이 진행합니다(필요한 데이터가 없으면 실패할 수 있음).")
+            self._say(eid, "네트워크 정책이 deny 라서 네트워크 없이 진행합니다(필요한 데이터가 없으면 실패할 수 있음).")
         reasons = self._gate_reasons(plan)
         if not exp["approved"]:
             self.ledger.update(eid, status="awaiting_approval", phase="build",
                                approval_reasons=json.dumps(reasons, ensure_ascii=False))
             self.ledger.add_event(eid, "approval", "승인 필요: " + "; ".join(reasons))
-            self.notifier.post(self.ledger.get(eid), "📄 승인할 계획과 실행 명세를 첨부합니다.",
+            self.notifier.post(self.ledger.get(eid), "승인할 계획과 실행 명세를 첨부합니다.",
                                [d / "plan.md", d / "protocol.json"])
             self.notifier.ask_approval(self.ledger.get(eid), reasons, plan["summary"])
             return False
@@ -541,7 +541,7 @@ class Lab:
             meta = self._meta(eid)
             if meta.get("fix_rounds", 0) < 1:
                 self._set_meta(eid, fix_rounds=meta.get("fix_rounds", 0) + 1, fix_note=x["notes"])
-                self._say(eid, "↩️ 실행 문제를 백엔드 개발자에게 돌려보내 수정을 요청합니다(1회).")
+                self._say(eid, "실행 문제를 백엔드 개발자에게 돌려보내 수정을 요청합니다(1회).")
                 self._advance(eid, "build")
                 return True
             return self._fail(eid, "실행 실패(수정 후에도): " + x["notes"])
@@ -575,7 +575,7 @@ class Lab:
             raise RuntimeError("백엔드 개발자가 분석 종료를 보고하지 않음: " + _short(res.text, 300))
         (d / "notes" / "analysis_build.json").write_text(json.dumps(b, ensure_ascii=False, indent=2), encoding="utf-8")
         warn = "" if (d / "results" / "derived" / "analysis_summary.json").exists() else \
-            "\n⚠️ results/derived/analysis_summary.json 이 없습니다."
+            "\nresults/derived/analysis_summary.json 이 없습니다."
         self._say(eid, f"{label('developer')} 전체 분석 {b['status']}\n{_short(b['summary'], 700)}{warn}")
         if b["status"] != "ready":
             return self._fail(eid, "전체 분석 미완료: " + b["summary"])
@@ -591,10 +591,10 @@ class Lab:
     def _phase_interpret(self, exp: dict) -> bool:
         eid = exp["id"]
         roles = self._meta(eid).get("consult") or list(CONSULTANTS)
-        self._say(eid, f"🔎 결과 해석 시작: {', '.join(label(r) for r in roles)}")
+        self._say(eid, f"결과 해석 시작: {', '.join(label(r) for r in roles)}")
         memos = self._memo_round(exp, roles, stage="interpret(해석)", out_fmt="report/interpretation_{role}.md",
                                  instruction=self._interpret_instruction())
-        self._post_memos(eid, "🔎 해석 메모 도착", memos)
+        self._post_memos(eid, "해석 메모 도착", memos)
         self._advance(eid, "report")
         return True
 
@@ -608,14 +608,14 @@ class Lab:
         network, host = self._perms(exp)
         changed = False
         if by.get("practitioner"):
-            self._say(eid, f"↩️ 검증 지적을 {label('practitioner')}에게 전달 ({len(by['practitioner'])}건)")
+            self._say(eid, f"검증 지적을 {label('practitioner')}에게 전달 ({len(by['practitioner'])}건)")
             self._call(eid, "practitioner", self._header(exp, "fix(실행 문제 수정)") +
                        "\n\n## 검증 지적\n" + fmt_issues(by["practitioner"]) +
                        "\n\n문제를 고치고 필요한 부분만 다시 실행하세요. 끝나면 `finish_execution`.",
                        only=_only("practitioner", "finish_plan"), network=network, host=host)
             changed = True
         if by.get("developer") or changed:
-            self._say(eid, f"↩️ {label('developer')} 코드·분석 수정" +
+            self._say(eid, f"{label('developer')} 코드·분석 수정" +
                       (f" ({len(by.get('developer', []))}건)" if by.get("developer") else " (재실행 반영)"))
             self._call(eid, "developer", self._header(exp, "fix(분석 수정·재실행)") +
                        "\n\n## 검증 지적\n" + fmt_issues(by.get("developer", [])) +
@@ -626,7 +626,7 @@ class Lab:
         targets = set(roles_all) if changed else set()
         targets |= {r for r in by if r in CONSULTANTS}
         if targets:
-            self._say(eid, "↩️ 전문가 해석 갱신: " + ", ".join(label(r) for r in sorted(targets)))
+            self._say(eid, "전문가 해석 갱신: " + ", ".join(label(r) for r in sorted(targets)))
             extra = {r: fmt_issues(by.get(r, [])) for r in targets if by.get(r)}
             self._memo_round(exp, sorted(targets), stage="interpret(해석 갱신)",
                              out_fmt="report/interpretation_{role}.md",
@@ -700,8 +700,8 @@ class Lab:
         exp = self.ledger.get(eid)
         d = self.cfg.experiments_dir / eid
         verdict = review.get("verdict")
-        vline = {"pass": f"✅ 검증 통과 ({rounds}차)", "revise": f"⚠️ 검증 지적 {len(unresolved)}건 미해결 — 보고서 끝의 '검증 결과'를 확인하세요",
-                 "unverified": "⚠️ 검증이 완료되지 않았습니다"}.get(verdict, str(verdict))
+        vline = {"pass": f"검증 통과 ({rounds}차)", "revise": f"검증 지적 {len(unresolved)}건 미해결 — 보고서 끝의 '검증 결과'를 확인하세요",
+                 "unverified": "검증이 완료되지 않았습니다"}.get(verdict, str(verdict))
         files: list[Path] = [d / "report" / "report.md"]
         for a in report.get("attachments", []):
             p = (d / a).resolve()
@@ -715,7 +715,7 @@ class Lab:
         self.ledger.update(eid, status="done", summary=_short(summary, 1500))
         self.ledger.add_event(eid, "done", f"완료 ({verdict})")
         self._git_commit(f"{eid}: {exp['title']}")
-        self.notifier.post_report(self.ledger.get(eid), f"✅ **{eid} 완료** — {exp['title']}\n\n{summary}\n\n{vline}", files)
+        self.notifier.post_report(self.ledger.get(eid), f"**{eid} 완료** — {exp['title']}\n\n{summary}\n\n{vline}", files)
         return False
 
     # ================= git =================

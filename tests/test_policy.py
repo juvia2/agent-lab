@@ -125,3 +125,35 @@ def test_set_policy_opens_and_closes_experiment_only(tmp_path):
     assert "없" in set_policy(cfg, "EXP-002", True)          # 없는 실험
     assert "EXP-" in set_policy(cfg, "INTAKE", False)         # 채널 정책은 디스코드에서 못 바꾼다
     assert not (tmp_path / "policies" / "EXP-002.json").exists()
+
+
+def test_experiment_inherits_channel_policy_once(tmp_path):
+    """연구자가 #실험진행에서 맡긴 실험은 채널 정책을 물려받고, 이미 정해진 실험 정책은 덮어쓰지 않는다."""
+    import json
+    from types import SimpleNamespace as NS
+    from lab.policy import DataPolicy, inherit_policy, load_policy
+    cfg = NS(lab_home=tmp_path)
+    (tmp_path / "policies").mkdir()
+    assert inherit_policy(cfg, "EXP-001", "INTAKE") is False                    # 채널 정책이 없으면 로컬 전용 유지
+    assert load_policy(cfg, "EXP-001") == DataPolicy()
+    (tmp_path / "policies" / "INTAKE.json").write_text(json.dumps(
+        {"classification": "public", "external_backends": ["claude", "codex"], "discord_publish": True}))
+    assert inherit_policy(cfg, "EXP-001", "INTAKE") is True
+    p = load_policy(cfg, "EXP-001")
+    assert p.allows_discord and p.allows_backend("claude") and not p.allows_backend("gemini")
+    (tmp_path / "policies" / "EXP-002.json").write_text(json.dumps({"classification": "restricted"}))
+    assert inherit_policy(cfg, "EXP-002", "INTAKE") is False                    # 연구자가 정한 실험 정책은 그대로
+    assert inherit_policy(cfg, "EXP-003", "../x") is False
+
+
+def test_submit_from_intake_thread_inherits_policy(make_lab):
+    import json
+    from conftest import T
+    from lab.director import Director
+    from lab.policy import load_policy
+    lab, _ = make_lab({"director": [[T("submit_experiment", title="x", request_markdown="## q")], [("text", "접수됨")]]})
+    (lab.cfg.lab_home / "policies").mkdir(parents=True, exist_ok=True)
+    (lab.cfg.lab_home / "policies" / "INTAKE.json").write_text(json.dumps(
+        {"classification": "public", "external_backends": ["claude"], "discord_publish": True}))
+    Director(lab).reply([{"role": "user", "content": "접수"}], thread_id=1, channel_id=1, requester_id=42)
+    assert load_policy(lab.cfg, "EXP-001").allows_discord

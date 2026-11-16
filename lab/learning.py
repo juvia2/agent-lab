@@ -116,4 +116,4 @@ def literature_report(md: str) -> tuple[str, str]:
     room = MAX_DESC - len(head) - len(tail)
     if len(digest) > room:
         digest = digest[:room].rsplit("\n", 1)[0] + "\n…"
-    return f"📚 문헌 학습 완료 · 논문 {len(titles)}편", head + digest + tail
+    return f"문헌 학습 완료 · 논문 {len(titles)}편", head + digest + tail

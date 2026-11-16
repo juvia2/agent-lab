@@ -143,7 +143,7 @@ def decisions_summary(cfg) -> str:
     data = _dload(cfg)
     if not data:
         return "기록된 결정이 없습니다."
-    label = {"proposed": "⏳ 확인 대기", "confirmed": "✅ 확정", "rejected": "🚫 거절", "retired": "🗄️ 폐기"}
+    label = {"proposed": "확인 대기", "confirmed": "확정", "rejected": "거절", "retired": "폐기"}
     return "\n".join(f"{d['id']} {label.get(d['status'], d['status'])}"
                      f"{' [' + d['exp_id'] + ']' if d.get('exp_id') else ''} — {d['text']}" for d in data)
 

@@ -74,8 +74,17 @@ def parse_route(text: str) -> tuple[str, str]:
     return route, rest
 
 
+_EMOJI = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u21A9\u21AA\u23E9-\u23FA\u2139]"
+                    r"(?:\uFE0F|\u200D[\U0001F000-\U0001FAFF\u2600-\u27BF])*\uFE0F? ?")
+
+
+def strip_emoji(text: str) -> str:
+    """디스코드에 올리는 글에서 이모지를 지운다(2026-11-16 연구자 지시). 화살표(→)·괄호 기호는 남긴다."""
+    return _EMOJI.sub("", text or "")
+
+
 def chunks(text: str, n: int = MAX_LEN) -> list[str]:
-    text = text.strip() or "(내용 없음)"
+    text = strip_emoji(text).strip() or "(내용 없음)"
     out: list[str] = []
     while len(text) > n:
         cut = text.rfind("\n", 0, n)
@@ -96,7 +105,7 @@ class ApprovalButton(discord.ui.DynamicItem[discord.ui.Button],
     def __init__(self, action: str, exp_id: str):
         ok = action == "approve"
         super().__init__(discord.ui.Button(
-            label="승인" if ok else "거부", emoji="✅" if ok else "🚫",
+            label="승인" if ok else "거부",
             style=discord.ButtonStyle.success if ok else discord.ButtonStyle.danger,
             custom_id=f"lab:{action}:{exp_id}"))
         self.action, self.exp_id = action, exp_id
@@ -234,7 +243,7 @@ class DiscordNotifier(Notifier):
     async def _ask(self, exp, reasons, plan_summary):
         ch = await self._channel_for(exp)
         owner = self.cfg.discord_owner_id
-        text = (f"🔐 <@{owner}> **{exp['id']}** 승인이 필요합니다.\n"
+        text = (f"<@{owner}> **{exp['id']}** 승인이 필요합니다.\n"
                 f"사유:\n" + "\n".join(f"- {r}" for r in reasons) +
                 f"\n\n계획 요약:\n{plan_summary[:900]}\n\n계획 전문은 `plan.md` 에 있습니다(스레드에서 물어보세요).")
         view = discord.ui.View(timeout=None)
@@ -307,7 +316,7 @@ class LabBot(discord.Client):
         recovered = self.lab.ledger.reset_interrupted()
         self.lab.start_workers(self.stop_event)
         team = [m.role for m, _ in self.members]
-        msg = "🟢 **연구실 가동**" + (f" · 팀원 봇 {len(team)}명 접속 시도" if team else "") + (f"\n🔄 중단됐던 실험 {len(recovered)}건을 이어서 진행합니다: {', '.join(recovered)}"
+        msg = "**연구실 가동**" + (f" · 팀원 봇 {len(team)}명 접속 시도" if team else "") + (f"\n중단됐던 실험 {len(recovered)}건을 이어서 진행합니다: {', '.join(recovered)}"
                                     if recovered else "")
         if self.startup_note:
             msg += "\n" + self.startup_note
@@ -433,7 +442,7 @@ class LabBot(discord.Client):
         target = None
         if isinstance(ch, discord.TextChannel) and ch.name == self.cfg.intake_channel:
             title = re.sub(r"\s+", " ", text)[:60] or "새 요청"
-            target = await message.create_thread(name=f"💬 {title}"[:100], auto_archive_duration=10080)
+            target = await message.create_thread(name=f"{title}"[:100], auto_archive_duration=10080)
             thread_id = target.id
         elif isinstance(ch, discord.Thread) and (
                 (ch.parent and ch.parent.name == self.cfg.intake_channel) or self.lab.ledger.find_by_thread(ch.id)):
@@ -466,7 +475,7 @@ class LabBot(discord.Client):
             except Exception as e:
                 handoffs = []
                 log.exception("대화 처리 오류")
-                reply = f"⚠️ 처리 중 오류가 났습니다: {type(e).__name__}: {str(e)[:300]}"
+                reply = f"처리 중 오류가 났습니다: {type(e).__name__}: {str(e)[:300]}"
             for part in chunks(reply):
                 await target.send(part)
         if handoffs:                              # 멘션 없이도 맞는 팀원이 가져가서 자기 이름으로 답한다
@@ -513,7 +522,7 @@ class LabBot(discord.Client):
                                           policy_id="ADHOC", tools=[])
         except Exception as e:
             log.exception("의뢰 분류 오류")
-            await message.reply(f"⚠️ 분류 중 오류: {type(e).__name__}. 담당자를 @멘션해서 다시 올려 주세요.",
+            await message.reply(f"분류 중 오류: {type(e).__name__}. 담당자를 @멘션해서 다시 올려 주세요.",
                                 mention_author=False)
             return
         claims, route, note = bus.parse_claims(out)
@@ -533,7 +542,7 @@ class LabBot(discord.Client):
                                 mention_author=False)
             return
         who = ", ".join(DISPLAY_EN[r] for r, _ in claims)
-        await message.reply(f"↪️ {note or who + ' 이(가) 가져갑니다.'}"
+        await message.reply(f"{note or who + ' 이(가) 가져갑니다.'}"
                             + (f"\n(접속해 있지 않아 제외: {', '.join(absent)})" if absent else ""), mention_author=False)
         trace = bus.Trace(self.cfg, channel=self.cfg.adhoc_channel)
         trace.emit("request", text=now_text)
@@ -556,7 +565,7 @@ class LabBot(discord.Client):
                          + (f"\n[먼저 끝낸 동료의 작업 파일은 read_peer_file 로 읽을 수 있다: {earlier}]" if earlier else ""))
                 for r, said in done:
                     body += f"\n\n[먼저 끝낸 {DISPLAY_EN[r]}의 답]\n{said[:2500]}"
-                await mch.send(f"✋ {task}", allowed_mentions=discord.AllowedMentions.none())
+                await mch.send(f"맡습니다: {task}", allowed_mentions=discord.AllowedMentions.none())
             said = await member._on_adhoc(mmsg, forwarded=body, src=message, trace=trace, extra_files=carried)
             if said:
                 done.append((role, said))
@@ -607,11 +616,11 @@ class LabBot(discord.Client):
         body = (text or "").strip() or "(본문 없음, 첨부만 있음)"
         try:
             title = re.sub(r"\s+", " ", message.content or "").strip()[:60] or "새 요청"
-            head = await intake.send(f"📥 #{self.cfg.adhoc_channel} 에서 넘어온 실험 요청입니다. 원문: {message.jump_url}")
-            thread = await head.create_thread(name=f"💬 {title}"[:100], auto_archive_duration=10080)
+            head = await intake.send(f"#{self.cfg.adhoc_channel} 에서 넘어온 실험 요청입니다. 원문: {message.jump_url}")
+            thread = await head.create_thread(name=f"{title}"[:100], auto_archive_duration=10080)
             for part in chunks("연구자 요청 원문(#" + self.cfg.adhoc_channel + "):\n" + body):
                 await thread.send(part, allowed_mentions=discord.AllowedMentions.none())
-            await message.reply(f"🧪 실험 수준의 일이라 {thread.mention} 로 옮겨 접수를 진행합니다. 다시 올리실 필요 없습니다. "
+            await message.reply(f"실험 수준의 일이라 {thread.mention} 로 옮겨 접수를 진행합니다. 다시 올리실 필요 없습니다. "
                                 "이어지는 확인·질문은 그 스레드에서 답해 주세요.", mention_author=False)
         except discord.DiscordException:
             log.exception("실험 채널로 옮기기 실패")
@@ -636,7 +645,7 @@ class LabBot(discord.Client):
                         extra_system=PROMOTED.format(channel=self.cfg.adhoc_channel))
             except Exception as e:
                 log.exception("옮긴 실험 요청 처리 오류")
-                reply = (f"⚠️ 접수 처리 중 오류가 났습니다: {type(e).__name__}: {str(e)[:300]}\n"
+                reply = (f"접수 처리 중 오류가 났습니다: {type(e).__name__}: {str(e)[:300]}\n"
                          "이 스레드에 '다시 접수해'라고 답하면 이어서 처리합니다.")
             for part in chunks(reply):
                 await thread.send(part)
@@ -781,11 +790,11 @@ class LabBot(discord.Client):
                 f"- `#{self.cfg.intake_channel}` 에 하고 싶은 실험을 자유롭게 쓰면 연구실장이 요청서로 정리해 접수합니다. "
                 f"데이터 파일은 같이 첨부하세요(`/data/uploads/` 로 저장).\n"
                 f"- 실험마다 스레드가 열리고, 거기서 진행 상황·결과·전문가 의견을 자유롭게 물어보세요.\n"
-                f"- 승인이 필요한 실험은 스레드에 ✅/🚫 버튼이 뜹니다(`/approve`, `/reject` 도 가능).\n"
+                f"- 승인이 필요한 실험은 스레드에 승인/거부 버튼이 뜹니다(`/approve`, `/reject` 도 가능).\n"
                 f"- `#{self.cfg.adhoc_channel}` 는 실험과 별개의 단건 업무 창구입니다. 담당자를 @멘션하면 그 팀원이 바로 처리하고, "
                 f"멘션 없이 올리면 연구실장이 맞는 팀원에게 넘깁니다(샌드박스·네트워크 없음·{self.cfg.adhoc_timeout_min}분 상한). "
                 f"실험 수준의 일이면 `#{self.cfg.intake_channel}` 스레드로 자동으로 옮겨 접수합니다(다시 올릴 필요 없음).\n"
-                f"- 실험 스레드가 🔒 로 막히면 `/policy EXP-### open` 으로 엽니다(디스코드 게시·클라우드 모델 허용). `close` 로 다시 닫습니다.\n"
+                f"- 실험 스레드가 자료 정책으로 막히면 `/policy EXP-### open` 으로 엽니다(디스코드 게시·클라우드 모델 허용). `close` 로 다시 닫습니다.\n"
                 f"- 처리하며 배운 성향·요령은 누적되어 메인 실험에도 반영됩니다. `/learn list` 로 보고 `approve`/`reject`/`forget`.\n"
                 f"- 연구실장은 과거 실험·결정을 출처와 검증 상태를 붙여 찾아 줍니다. 대화에서 내린 연구 결정은 제안으로 남고 "
                 f"`/memory approve D-###` 로 확정합니다(`/memory list`).\n"
