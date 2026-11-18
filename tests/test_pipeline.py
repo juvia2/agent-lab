@@ -42,6 +42,8 @@ def build_turns():
 
 def analyze_turns():
     return [[T("write_file", path="code/analysis/analyze.py", content=ANALYZE_PY)],
+            [T("request_command_approval", commands=["python3 code/analysis/analyze.py"], purpose="전체 분석 집계",
+               retrains=False, outputs=["results/derived/analysis_summary.json"])],
             [T("run_command", command="python3 code/analysis/analyze.py")],
             [T("finish_build", status="ready", summary="전체 분석 완료", entrypoints=["python3 code/analysis/analyze.py"],
                tests_run=["ok"])]]
@@ -249,7 +251,6 @@ def test_unresolved_review_is_disclosed(make_lab):
 @pytest.mark.parametrize("phase,role,turn", [
     ("build", "developer", [T("finish_build", status="partial", summary="코드 미완성",
                               entrypoints=[], tests_run=[])]),
-    ("execute", "practitioner", [T("finish_execution", status="partial", notes="일부만 실행")]),
     ("analyze", "developer", [T("finish_build", status="partial", summary="분석 미완성",
                                 entrypoints=[], tests_run=[])]),
 ])
@@ -257,8 +258,6 @@ def test_partial_stage_does_not_advance(make_lab, phase, role, turn):
     s = script()
     if phase == "build":
         s[role] = [turn]
-    elif phase == "execute":
-        s[role] = [plan_turn(), turn]
     else:
         s[role] = [*build_turns(), turn]
     lab, notifier = make_lab(s)
@@ -296,17 +295,31 @@ def test_pass_with_critical_issue_does_not_publish(make_lab):
     assert not any(t.startswith(f"✅ **{exp['id']} 완료**") for _, t, _ in notifier.sent)
 
 
-def test_execution_failure_goes_back_to_developer_once(make_lab):
+@pytest.mark.parametrize("status", ["failed", "partial"])
+def test_execution_failure_goes_back_to_developer_once(make_lab, status):
     s = script()
     s["practitioner"] = [plan_turn(),
-                         [T("finish_execution", status="failed", notes="ImportError: foo")],
+                         [T("finish_execution", status=status, notes="ImportError: foo")],
                          *exec_turns()]
     s["developer"] = [*build_turns(), *build_turns(), *analyze_turns()]
     lab, notifier = make_lab(s)
     exp = submit(lab)
     approve_plan_and_finish(lab, exp)
     assert lab.ledger.get(exp["id"])["status"] == "done"
-    assert any("돌려보내" in t for _, t, _ in notifier.sent)
+    assert any("구현 단계로 되돌립니다" in t for _, t, _ in notifier.sent)
+
+
+def test_partial_execution_twice_fails_after_one_round(make_lab):
+    s = script()
+    partial = [T("finish_execution", status="partial", notes="보고서 검증 진입점 없음")]
+    s["practitioner"] = [plan_turn(), partial, partial]
+    s["developer"] = [*build_turns(), *build_turns()]
+    lab, _ = make_lab(s)
+    exp = submit(lab)
+    approve_plan_and_finish(lab, exp)
+    e = lab.ledger.get(exp["id"])
+    assert e["status"] == "failed" and e["phase"] == "execute"
+    assert "미완료(구현 단계로 한 번 되돌린 뒤에도)" in e["error"]
 
 
 def test_budget_pauses_and_resume_adds_budget(make_lab):
@@ -414,3 +427,56 @@ def test_director_merges_history_and_answers_status(make_lab):
     out = Director(lab).reply([{"role": "assistant", "content": "안녕"}, {"role": "user", "content": "지금 뭐해?"},
                                {"role": "user", "content": "현황 알려줘"}])
     assert "없습니다" in out
+
+
+def test_resumed_execution_accepts_earlier_approved_run(make_lab):
+    # 본 실행이 이미 성공했고 코드가 그대로면, 재개한 실행 단계에서 다시 돌리지 않아도 넘어간다(덮어쓰기 금지 코드와 맞물려 맴돌던 문제).
+    s = script()
+    s["practitioner"] = [plan_turn(),
+                         [T("run_command", command="PYTHONPATH=code python3 code/run_experiment.py")],
+                         [T("request_change", current="보고서 없음", proposed="보고서 검증 추가", reason="-", impact="-")],
+                         [T("finish_execution", status="success", notes="기존 실행 결과 확인", result_files=[])]]
+    lab, _ = make_lab(s)
+    exp = submit(lab)
+    lab.process_one()
+    lab.approve(exp["id"])
+    lab.process_one()
+    assert lab.ledger.get(exp["id"])["status"] == "awaiting_approval"
+    lab.approve(exp["id"])
+    lab.process_one()
+    e = lab.ledger.get(exp["id"])
+    assert e["status"] == "done", e["error"]
+
+
+def test_earlier_run_not_accepted_after_code_changed(make_lab):
+    s = script()
+    s["practitioner"] = [plan_turn(),
+                         [T("run_command", command="PYTHONPATH=code python3 code/run_experiment.py")],
+                         [T("finish_execution", status="partial", notes="ImportError")],
+                         [T("finish_execution", status="success", notes="다시 안 돌림", result_files=[])]]
+    rewrite = [[T("write_file", path="code/run_experiment.py", content=RUN_PY + "# 고침\n")],
+               [T("finish_build", status="ready", summary="수정",
+                  entrypoints=["PYTHONPATH=code python3 code/run_experiment.py"], tests_run=[])]]
+    s["developer"] = [*build_turns(), *rewrite]   # 되돌아간 구현 단계에서 코드를 고침
+    lab, _ = make_lab(s)
+    exp = submit(lab)
+    approve_plan_and_finish(lab, exp)
+    e = lab.ledger.get(exp["id"])
+    assert e["status"] == "failed" and "성공 기록이 없음" in e["error"]
+
+
+def test_execute_prompt_scopes_out_report_stage(make_lab):
+    lab, _ = make_lab(script())
+    exp = submit(lab)
+    approve_plan_and_finish(lab, exp)
+    prompts = [p for role, p in lab.client.prompts if role == "practitioner" and "execute(실행)" in p]
+    assert prompts and "report/report.md" in prompts[0] and "다음 단계" in prompts[0]
+
+
+def test_memo_post_is_readable():
+    """디스코드 메모 글: 소제목·목록으로 나누고, 빈 항목은 빼고, 이름은 다시 쓰지 않는다."""
+    from lab.pipeline import memo_post
+    text = memo_post({"summary": "새 명사 일반화는 지지되지 않는다.", "key_concerns": ["겹침 문항이 정확도를 끌어올림", " ", "c3", "c4"],
+                      "recommendations": []})
+    assert text.splitlines()[:2] == ["**결론**", "새 명사 일반화는 지지되지 않는다."]
+    assert "**근거·우려**\n- 겹침 문항이 정확도를 끌어올림\n- c3" in text and "c4" not in text and "**권고**" not in text

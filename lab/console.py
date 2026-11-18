@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import avatars, bus
-from .agents import DISPLAY_EN, ROLE_META
+from .agents import DISPLAY_EN
 
 log = logging.getLogger("lab.console")
 DEFAULT_PORT = 8765
@@ -51,6 +51,7 @@ COMMANDS = [
     ("/policy", "실험의 자료 정책 열기(디스코드 게시·클라우드 모델 허용)/닫기"),
     ("/learn list|approve|reject|forget", "누적 학습(연구자 성향·업무 요령) 보기·확인·삭제"),
     ("/memory list|approve|reject|retire", "연구실장 세컨드 브레인의 결정 기록 보기·확정·거절·폐기"),
+    ("/reading list|lens|close|retry", "논문 리딩 세션 목록 · 연구 지향 · 리딩 노트 작성 · 빠진 리딩 리포트 다시 쓰기"),
     ("/help", "사용법"),
 ]
 
@@ -58,8 +59,7 @@ COMMANDS = [
 def state(cfg, after: float = 0.0) -> dict:
     return {"events": bus.tail(cfg, after), "experiments": experiments(cfg),
             "commands": [{"cmd": c, "desc": d} for c, d in COMMANDS],
-            "roles": [{"key": r, "name": DISPLAY_EN[r], "emoji": ROLE_META[r][0] if r in ROLE_META else "🧑‍💼",
-               "hue": avatars.HUE.get(r, 0), "avatar": avatars.svg(r)}
+            "roles": [{"key": r, "name": DISPLAY_EN[r], "hue": avatars.HUE.get(r, 0), "avatar": avatars.svg(r)}
                       for r in DISPLAY_EN],
             "limits": {"depth": bus.MAX_DEPTH, "calls": bus.MAX_CALLS, "claims": bus.MAX_CLAIMS}}
 
@@ -221,7 +221,7 @@ function drawGraph(a){
     n.appendChild(sv("circle",{cx:x,cy:y,r:26}));
     if(r.avatar){const av=sv("g",{class:"av",transform:`translate(${x-25} ${y-25}) scale(${50/64})`,style:"--h:"+r.hue});
       av.innerHTML=r.avatar.replace(/^<svg[^>]*>|<\/svg>$/g,"");n.appendChild(av)}
-    else{const em=sv("text",{x:x,y:y+7,class:"em"});em.textContent=r.emoji;n.appendChild(em)}
+    else{const em=sv("text",{x:x,y:y+7,class:"em"});em.textContent=r.name[0];n.appendChild(em)}
     const t=sv("text",{x:x,y:y+42});t.textContent=r.name;n.appendChild(t);g.appendChild(n)}
 }
 function ago(ts){const s=Math.max(0,Date.now()/1000-ts);return s<60?Math.floor(s)+"초 전":s<3600?Math.floor(s/60)+"분 전":s<86400?Math.floor(s/3600)+"시간 전":Math.floor(s/86400)+"일 전"}
@@ -238,7 +238,7 @@ function drawNow(a){
   }
   box.replaceChildren();
   for(const r of roles){const k=r.key,w=a.wait.has(k),b=a.busy.has(k),c=el("div","ag"+(w?" wait":b?" busy":""));
-    const pic=el("div");if(r.avatar){pic.innerHTML=r.avatar;const s=pic.querySelector("svg");if(s){s.classList.add("av");s.style.setProperty("--h",r.hue)}}else pic.textContent=r.emoji;
+    const pic=el("div");if(r.avatar){pic.innerHTML=r.avatar;const s=pic.querySelector("svg");if(s){s.classList.add("av");s.style.setProperty("--h",r.hue)}}else pic.textContent=r.name[0];
     c.appendChild(pic);const body=el("div");const top=el("div");top.appendChild(el("span","nm",r.name));
     top.appendChild(el("span","stt",w?"동료의 답을 기다리는 중":b?"일하는 중":"쉬는 중"));body.appendChild(top);
     const d=doing[k],la=lastAct[k];

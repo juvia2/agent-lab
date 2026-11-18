@@ -20,8 +20,19 @@ class Notifier:
     def ask_approval(self, exp: dict, reasons: list[str], plan_summary: str) -> None:
         raise NotImplementedError
 
+    def ask_command_approval(self, exp: dict, req: dict) -> None:
+        """경량 승인(재학습 없는 재집계·점검 명령) 요청. 기본은 글로만 알리고 /approve 로 승인."""
+        self.post(exp, command_approval_text(exp, req), role=req.get("role"))
+
     def broadcast(self, text: str) -> None:
         self.post(None, text)
+
+
+def command_approval_text(exp: dict, req: dict) -> str:
+    cmds = "\n".join(f"`{c}`" for c in req.get("commands", []))
+    outs = ", ".join(req.get("outputs") or []) or "(명시 없음)"
+    return (f"**명령 승인 요청 {req['id']}** (경량 승인: 재학습 없음)\n목적: {req.get('purpose', '')}\n"
+            f"명령:\n{cmds}\n새로 쓰는 곳: {outs}\n승인 전에는 실행되지 않습니다. 버튼 또는 `/approve {exp['id']}`")
 
 
 class ConsoleNotifier(Notifier):

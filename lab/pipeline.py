@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import re
 import shutil
 import subprocess
 import threading
@@ -12,18 +13,20 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .agents import ROLE_META, label, model_for, system_for
+from . import approvals
+from .agents import DISPLAY_EN, ROLE_META, label, model_for, system_for
 from .config import ROOT, Config
 from .ledger import PHASE_STATUS, Ledger
 from .llm import BudgetExceeded, NoBackend, Stopped, run_agent
 from .notebook import Notebook
 from .notify import Notifier
 from .policy import load_policy
-from .protocol import check_protocol, sha256, write_protocol
+from .protocol import check_protocol, code_sha256, sha256, write_protocol
 from .sandbox import Sandbox
-from .tools import CONSULTANTS, ROLE_TOOLS, Toolbox, tool_schemas
+from .tools import CONSULT_SECTION, CONSULTANTS, ROLE_TOOLS, Toolbox, consult_values, tool_schemas
 
 log = logging.getLogger("lab")
+ASK_ROLES = set(ROLE_META) - {"director"}   # 실험 모든 단계에서 ask_agent 로 동료를 부를 수 있는 역할(팀원 전원)
 
 STATUS_LABEL = {"queued": "대기", "planning": "설계 중", "awaiting_approval": "승인 대기",
                 "running": "실행 중", "analyzing": "분석 중", "done": "완료",
@@ -50,6 +53,90 @@ def fmt_issues(issues: list[dict]) -> str:
 def _short(t: str, n: int) -> str:
     t = (t or "").strip()
     return t if len(t) <= n else t[:n] + "…"
+
+
+def memo_post(m: dict) -> str:
+    """디스코드용 메모 요약: 굵은 소제목 + 짧은 결론 + 목록. 전문은 report/·notes/ 파일에 있다."""
+    out = ["**결론**", _short(m.get("summary", ""), 250)]
+    for title, key, n in (("근거·우려", "key_concerns", 3), ("권고", "recommendations", 2)):
+        items = [f"- {_short(x, 160)}" for x in m.get(key, [])[:n] if str(x).strip()]
+        if items:
+            out += ["", f"**{title}**", *items]
+    return "\n".join(out)
+
+
+# ---- 자문·해석 단계 산출물 승격(notes → results/data_checks) ----
+# notes/ 의 작업 메모 가운데 파이프라인이 쓰는 파일은 승격 대상이 아니다. 나머지(점검 스크립트·출력)는 수치의 근거라
+# results/data_checks/<단계>/ 로 옮겨 보고서가 인용할 수 있게 한다(EXP-001: 자문의 정확 일치 50건이 notes 에 갇혀 보고서에서 빠짐).
+SYSTEM_NOTES = re.compile(r"^(consult_.*\.md|approved_change_.*\.md|approved_command_.*\.md|build\.(json|md)|execution\.json|"
+                          r"analysis_build\.json|analysis_notes.*|deviations\.md|fix_response\.md|perf_reports\.jsonl|"
+                          r"analysis_notes_replace\.md)$")
+PROMOTE_MAX_BYTES = 20_000_000
+_NUMERIC = re.compile(r"\d+(?:\.\d+)?\s*(건|개|문항|쌍|명|%|회|편)|0\.\d{2,}|\d+\s*/\s*\d+")
+
+
+def note_artifacts(d: Path) -> list[str]:
+    notes = d / "notes"
+    if not notes.is_dir():
+        return []
+    return sorted(str(p.relative_to(d)) for p in notes.rglob("*")
+                  if p.is_file() and "__pycache__" not in p.parts and not SYSTEM_NOTES.match(p.name))
+
+
+def promote_notes(d: Path, rels: list[str], stage: str) -> list[dict]:
+    """notes 산출물을 results/data_checks/<stage>/ 로 복사하고 manifest.json 에 출처·체크섬을 남긴다(원본은 그대로)."""
+    out_dir = d / "results" / "data_checks" / stage
+    man_path = out_dir / "manifest.json"
+    try:
+        man = json.loads(man_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        man = {"stage": stage, "note": "에이전트가 notes/ 에서 만든 점검 산출물의 사본. verified=false 는 아직 재실행 확인 전",
+               "files": []}
+    have = {f["source"]: f for f in man["files"]}
+    added = []
+    for rel in rels:
+        src = d / rel
+        if not src.is_file() or src.stat().st_size > PROMOTE_MAX_BYTES:
+            continue
+        digest = hashlib.sha256(src.read_bytes()).hexdigest()
+        if have.get(rel, {}).get("sha256") == digest:
+            continue
+        dst = out_dir / Path(rel).relative_to("notes")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        entry = {"source": rel, "copy": str(dst.relative_to(d)), "sha256": digest, "bytes": src.stat().st_size,
+                 "promoted_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "verified": False}
+        have[rel] = entry
+        added.append(entry)
+    if added:
+        man["files"] = list(have.values())
+        out_dir.mkdir(parents=True, exist_ok=True)
+        man_path.write_text(json.dumps(man, ensure_ascii=False, indent=1), encoding="utf-8")
+    return added
+
+
+def numeric_hints(d: Path, limit: int = 40) -> list[str]:
+    """자문 메모에서 수치·건수가 든 줄(자문 확인값 후보)."""
+    rows: list[str] = []
+    for p in sorted((d / "notes").glob("consult_*.md")):
+        role = p.stem.replace("consult_", "")
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            t = line.strip(" -*#\t")
+            if t and _NUMERIC.search(t):
+                rows.append(f"[{role}] {_short(t, 200)}")
+                if len(rows) >= limit:
+                    return rows
+    return rows
+
+
+def consult_table_md(values: list[dict]) -> str:
+    def cell(x) -> str:
+        return str(x or "").replace("|", "/").replace("\n", " ").strip()
+    lines = ["## 자문 확인값 (자동 기록, 보고서의 '## 자문 확인값 대조' 절에서 하나씩 대조)", "",
+             "| 항목 | 자문 값 | 출처 | 계획에서의 처리 |", "|---|---|---|---|"]
+    lines += [f"| {cell(v.get('item'))} | {cell(v.get('value'))} | {cell(v.get('source'))} | {cell(v.get('plan_use'))} |"
+              for v in values] or ["| (자문에 수치 없음) | | | |"]
+    return "\n".join(lines)
 
 
 class Lab:
@@ -116,8 +203,19 @@ class Lab:
         self.ledger.add_event(exp["id"], "resumed", f"재개 (단계: {PHASE_LABEL.get(exp['phase'], exp['phase'])})")
         return f"{exp['id']} 재개: '{PHASE_LABEL.get(exp['phase'], exp['phase'])}' 단계부터 이어서 진행합니다."
 
+    def decide_command(self, exp_id: str, rid: str | None, ok: bool) -> str:
+        """경량 승인(재집계·점검 명령) 결정. 디스코드 버튼·/approve·콘솔 approve 가 모두 여기로 온다."""
+        exp = self.ledger.get(exp_id)
+        if not exp:
+            return f"{exp_id}: 없는 실험입니다."
+        msg = approvals.decide(self.cfg, exp["id"], rid, ok)
+        self.ledger.add_event(exp["id"], "command_approval", msg)
+        return msg
+
     def approve(self, exp_id: str) -> str:
         exp = self.ledger.get(exp_id)
+        if exp and exp["status"] != "awaiting_approval" and approvals.pending(self.cfg, exp["id"]):
+            return self.decide_command(exp["id"], None, True)
         if not exp or exp["status"] != "awaiting_approval":
             return f"{exp_id}: 승인 대기 상태가 아닙니다."
         meta = self._meta(exp["id"])
@@ -149,6 +247,8 @@ class Lab:
 
     def reject(self, exp_id: str) -> str:
         exp = self.ledger.get(exp_id)
+        if exp and exp["status"] != "awaiting_approval" and approvals.pending(self.cfg, exp["id"]):
+            return self.decide_command(exp["id"], None, False)
         if not exp or exp["status"] != "awaiting_approval":
             return f"{exp_id}: 승인 대기 상태가 아닙니다."
         self.ledger.update(exp["id"], status="stopped")
@@ -338,11 +438,43 @@ class Lab:
         tb = Toolbox(cfg=self.cfg, exp_id=eid, role=role, sandbox=self.sandbox, notebook=self.notebook,
                      notify=self.notifier, network_allowed=network, host_allowed=host,
                      enforce_protocol=role == "practitioner" and self.ledger.get(eid)["phase"] not in ("consult", "plan"),
-                     approved_protocol_sha256=self._meta(eid).get("approved_protocol_sha256"))
-        return run_agent(self.client, model=model_for(self.cfg, role), system=system_for(role, self.cfg), prompt=prompt,
-                         tools=tool_schemas(role, only), execute=tb.execute, on_usage=self._usage_cb(eid),
-                         should_stop=self._stop_fn(eid), max_turns=self.cfg.max_agent_turns, max_tokens=max_tokens,
-                         data_policy=load_policy(self.cfg, eid))
+                     approved_protocol_sha256=self._meta(eid).get("approved_protocol_sha256"),
+                     # 본 실행 이후(전체 분석·보고서 수정)의 개발자 명령은 승인 목록으로 강제한다(approvals.py)
+                     enforce_commands=role == "developer" and self.ledger.get(eid)["phase"] in ("analyze", "report"),
+                     should_stop=self._stop_fn(eid))
+        policy = load_policy(self.cfg, eid)
+        system, tools, execute, trace = system_for(role, self.cfg), tool_schemas(role, only), tb.execute, None
+        if role in ASK_ROLES:                     # 팀원은 일하다 막히면 동료에게 묻는다. 질문·답은 실험 스레드에 각자 이름으로 올라간다
+            from . import bus
+            from .director import Director
+            from .team import answer_colleague
+            trace = bus.Trace(self.cfg, exp_id=eid, on_event=self._mirror_cb(eid))
+            read = lambda n, a: Director(self)._tool(n, a, None, None, None)  # noqa: E731
+
+            def execute(name: str, a: dict):
+                if name == "ask_agent":
+                    return bus.ask(trace, (role,), a.get("role", ""), a.get("question", ""),
+                                   lambda r, q, c: answer_colleague(self.cfg, self, read, trace, r, q, c, policy))
+                return tb.execute(name, a)
+            system, tools = system + bus.ASK_RULES, tools + [bus.ASK_SCHEMA]
+            trace.emit("claim", src=role, text=f"{eid} 작업")   # 열려 있는 동안 묻는 쪽·답하는 쪽 모두 '활동 중'
+        try:
+            return run_agent(self.client, model=model_for(self.cfg, role), system=system, prompt=prompt,
+                             tools=tools, execute=execute, on_usage=self._usage_cb(eid),
+                             should_stop=self._stop_fn(eid), max_turns=self.cfg.max_agent_turns, max_tokens=max_tokens,
+                             data_policy=policy)
+        finally:
+            if trace:
+                trace.emit("done", src=role)
+
+    def _mirror_cb(self, eid: str):
+        """동료 호출(call)과 답(answer)을 실험 스레드에 말한 사람의 봇 이름으로 올린다."""
+        def cb(ev: dict) -> None:
+            if ev.get("type") in ("call", "answer"):
+                head = "**질문** →" if ev["type"] == "call" else "**답** →"
+                self.notifier.post(self.ledger.get(eid), f"{head} @{DISPLAY_EN.get(ev.get('dst'), '?')}\n{ev.get('text', '')}"[:1900],
+                                   role=ev.get("src"))
+        return cb
 
     def _header(self, exp: dict, stage: str) -> str:
         network, host = self._perms(exp)
@@ -389,11 +521,8 @@ class Lab:
         if not memos:
             return
         self._say(eid, title)
-        for role, m in memos.items():                     # 전문가마다 자기 이름으로 올린다
-            lines = [f"{label(role)}: {_short(m.get('summary', ''), 300)}"]
-            for c in m.get("key_concerns", [])[:3]:
-                lines.append(f"  {_short(c, 200)}")
-            self._say(eid, "\n".join(lines), role=role)
+        for role, m in memos.items():                     # 전문가마다 자기 이름으로 올리므로 이름은 다시 쓰지 않는다
+            self._say(eid, memo_post(m), role=role)
 
     # ================= 단계 1: 전문가 자문 =================
     def _phase_consult(self, exp: dict) -> bool:
@@ -405,6 +534,11 @@ class Lab:
             instruction="자문 단계다. request.md 와 관련 과거 실험을 검토하고, 당신의 전문 영역에서 실험 설계 전에 "
                         "바로잡아야 할 점과 권고를 `submit_memo`로 제출하세요.")
         self._post_memos(eid, "자문 메모 도착", memos)
+        d = self.cfg.experiments_dir / eid
+        arts = note_artifacts(d)
+        self._set_meta(eid, consult_artifacts=arts)
+        if arts:
+            self._say(eid, f"자문 단계 점검 산출물 {len(arts)}개: 구현 단계 첫 작업으로 results/data_checks/consult/ 에 옮겨 재확인합니다.")
         self._advance(eid, "plan")
         return True
 
@@ -413,16 +547,34 @@ class Lab:
         eid = exp["id"]
         d = self.cfg.experiments_dir / eid
         memos = sorted(p.name for p in (d / "notes").glob("consult_*.md"))
+        hints = numeric_hints(d)
+        arts = self._meta(eid).get("consult_artifacts") or []
         prompt = (self._header(exp, "plan(계획 통합)") +
                   f"\n\n자문 메모: {', '.join('notes/' + m for m in memos) or '(없음)'}\n"
-                  "자문을 통합해 실험 계획을 세우고 `finish_plan`으로 제출하세요.")
+                  + (f"자문 단계 점검 산출물: {', '.join(arts)}\n" if arts else "") +
+                  "자문을 통합해 실험 계획을 세우고 `finish_plan`으로 제출하세요.\n\n"
+                  "## 자문 확인값(consult_values) 작성\n"
+                  "자문이 낸 수치·건수(중복·누출 건수, 표본 수, 기준값 등)를 빠짐없이 consult_values 로 옮기세요. "
+                  "보고서 단계에서 이 표와 하나씩 대조하고, 빠진 값이 있으면 보고서가 완료되지 않습니다. "
+                  "계획의 정의 때문에 값이 달라질 것이면(예: 정규화를 NFC·공백으로 좁혀 100건→90건) 그대로 두지 말고 "
+                  "plan_use 에 '정의 변경: 이유와 예상 차이'를 적으세요. 단계별 건수(정확 일치 / 공백 / 구두점)는 따로 적습니다."
+                  + ("\n\n자동 추출한 수치 후보(참고, 원문을 확인하고 옮기세요):\n" + "\n".join(f"- {h}" for h in hints)
+                     if hints else ""))
         res = self._call(eid, "practitioner", prompt, only=_only("practitioner", "finish_execution", "request_change"))
         plan = res.terminal
         if not plan:
             raise RuntimeError("실험 실무 담당이 계획을 제출하지 않고 종료함: " + _short(res.text, 300))
+        if hints and not plan.get("consult_values"):          # 장치: 자문에 수치가 있는데 표가 비면 한 번 되돌린다
+            self._say(eid, f"{label('practitioner')} 계획에 자문 확인값이 비어 있어 다시 요청합니다(자문 수치 후보 {len(hints)}줄).")
+            res = self._call(eid, "practitioner", prompt + "\n\n## 다시 제출\n방금 낸 계획의 consult_values 가 비었다. "
+                             "위 후보와 자문 메모를 보고 자문 확인값을 채워 계획 전체를 `finish_plan`으로 다시 제출하세요.",
+                             only=_only("practitioner", "finish_execution", "request_change"))
+            plan = res.terminal or plan
         if not plan.get("run_commands"):
             return self._fail(eid, "계획에 승인할 본 실행 명령(run_commands)이 없음")
-        (d / "plan.md").write_text(plan["plan_markdown"], encoding="utf-8")
+        cv = [v for v in plan.get("consult_values") or [] if isinstance(v, dict)]
+        plan["consult_values"] = cv
+        (d / "plan.md").write_text(plan["plan_markdown"].rstrip() + "\n\n" + consult_table_md(cv) + "\n", encoding="utf-8")
         (d / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
             write_protocol(d, plan["run_commands"])
@@ -431,7 +583,9 @@ class Lab:
         self.ledger.update(eid, plan_json=json.dumps(plan, ensure_ascii=False))
         self._say(eid, f"{label('practitioner')} 계획 확정\n{_short(plan['summary'], 900)}\n"
                        f"예상 {plan.get('est_runtime_min', '?')}분"
-                       + (f" / 위험: {_short('; '.join(plan.get('risks', [])), 300)}" if plan.get("risks") else ""))
+                       + (f" / 위험: {_short('; '.join(plan.get('risks', [])), 300)}" if plan.get("risks") else "")
+                       + f"\n자문 확인값 {len(cv)}개 고정(plan.md 끝 표, 보고서에서 대조)"
+                       + (" — 자문에 수치 후보가 있었는데 비어 있음, 승인 전에 확인하세요" if hints and not cv else ""))
         if plan.get("needs_network") and self.cfg.network_policy == "deny":
             self._say(eid, "네트워크 정책이 deny 라서 네트워크 없이 진행합니다(필요한 데이터가 없으면 실패할 수 있음).")
         reasons = self._gate_reasons(plan)
@@ -468,6 +622,17 @@ class Lab:
             stage = "build(구현)"
             task = ("plan.md 와 자문 메모(notes/consult_*.md)를 읽고 구현 요구사항대로 코드를 구현하세요. "
                     "작은 입력으로 끝까지 시험 실행한 뒤 `finish_build`로 넘기세요.")
+            arts = meta.get("consult_artifacts") or note_artifacts(d)
+            promoted = promote_notes(d, arts, "consult") if arts else []
+            if arts:
+                task = ("## 첫 작업: 자문 단계 점검 산출물 옮기기·재확인\n"
+                        "자문 단계에서 돌린 점검 산출물을 results/data_checks/consult/ 에 복사해 두었다(manifest.json 에 출처·체크섬). "
+                        "점검 스크립트가 있으면 샌드박스에서 다시 돌려 같은 값이 나오는지 확인하고(출력은 results/data_checks/consult/ 아래 새 파일), "
+                        "results/data_checks/consult/verification.md 에 산출물별로 재실행 명령, 일치 여부, 핵심 건수와 문항 번호를 표로 적으세요. "
+                        "plan.md 끝의 '자문 확인값' 표에 있는 값은 여기서 results/ 근거를 갖게 됩니다. 확인되면 manifest.json 의 verified 를 true 로 바꿔도 됩니다.\n\n"
+                        "## 그다음\n" + task)
+                if promoted:
+                    self._say(eid, f"자문 점검 산출물 {len(promoted)}개를 results/data_checks/consult/ 로 옮김 → {label('developer')} 재확인 배정")
         self._say(eid, f"{label('developer')} {'수정' if fix_note else '구현'} 시작")
         res = self._call(eid, "developer", self._header(exp, stage) + "\n\n" + task, network=network, host=host)
         b = res.terminal
@@ -501,7 +666,7 @@ class Lab:
         except (ValueError, KeyError, OSError) as error:
             return self._fail(eid, f"실행 명세 오류: {error}")
         audit_path = self.cfg.lab_home / "audits" / f"{eid}.jsonl"
-        audit_before = len(audit_path.read_text(encoding="utf-8").splitlines()) if audit_path.exists() else 0
+        audit_mtime = audit_path.stat().st_mtime if audit_path.exists() else 0.0
         protected = [d / "request.md", d / "plan.md", d / "plan.json", d / "protocol.json"] + [
             p for p in (d / "code").rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"]
         before = {str(p.relative_to(d)): hashlib.sha256(p.read_bytes()).hexdigest() for p in protected if p.is_file()}
@@ -511,7 +676,12 @@ class Lab:
                   "\n\nplan.md 와 notes/build.json, code/README.md 를 읽고 구현된 코드를 실행해 결과를 만드세요. "
                   "notes/approved_change_*.md 가 있으면 승인된 변경만 반영하세요. "
                   "이전 시도의 흔적이 있으면 이어서 하세요. 계획이나 실행 설정을 바꿔야 한다면 변경 전에 `request_change`로 멈추세요. "
-                  "끝나면 `finish_execution`.")
+                  "끝나면 `finish_execution`.\n\n"
+                  "이 단계의 완료 기준: 승인된 실행 명령이 성공하고 results/ 산출물(results/run_manifest.json 포함)이 생긴 것. "
+                  "승인된 본 실행이 이미 성공해 결과가 남아 있고 코드가 그대로면 다시 돌리지 말고 확인만 한 뒤 success 로 끝내세요. "
+                  "report/report.md 작성, 보고서 수치의 출처 검증, 디스코드 채널 게시는 다음 단계(전체 분석→전문가 해석→보고서·검증)에서 "
+                  "다른 담당이 합니다. 계획서나 승인된 변경 메모에 그런 항목이 있어도, 그것이 아직 없다는 이유로 partial 이나 "
+                  "`request_change`를 하지 마세요. 남은 일로 notes 에 적기만 하면 됩니다.")
         res = self._call(eid, "practitioner", prompt, only=_only("practitioner", "finish_plan"),
                          network=network, host=host)
         after = {name: hashlib.sha256((d / name).read_bytes()).hexdigest() if (d / name).is_file() else None
@@ -537,23 +707,33 @@ class Lab:
                              "result_files": []}
         (d / "notes" / "execution.json").write_text(json.dumps(x, ensure_ascii=False, indent=2), encoding="utf-8")
         self._say(eid, f"{label('practitioner')} 실행 {x['status']}\n{_short(x['notes'], 900)}")
-        if x["status"] == "failed":
+        if x["status"] != "success":              # 실패든 미완료든 코드 쪽 일이면 개발자에게 한 번 돌려보낸다
+            what = "실패" if x["status"] == "failed" else "미완료"
             meta = self._meta(eid)
             if meta.get("fix_rounds", 0) < 1:
                 self._set_meta(eid, fix_rounds=meta.get("fix_rounds", 0) + 1, fix_note=x["notes"])
-                self._say(eid, "실행 문제를 백엔드 개발자에게 돌려보내 수정을 요청합니다(1회).")
+                self._say(eid, f"실행 {what}: 실무 담당의 보고를 백엔드 개발자에게 넘겨 구현 단계로 되돌립니다(1회).")
                 self._advance(eid, "build")
                 return True
-            return self._fail(eid, "실행 실패(수정 후에도): " + x["notes"])
-        if x["status"] != "success":
-            return self._fail(eid, "실행 미완료: " + x["notes"])
+            return self._fail(eid, f"실행 {what}(구현 단계로 한 번 되돌린 뒤에도): " + x["notes"])
         try:
-            audit = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()[audit_before:]] \
+            audit = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()] \
                 if audit_path.exists() else []
-            manifest = json.loads((d / "results/run_manifest.json").read_text(encoding="utf-8"))
+            manifest_path = d / "results/run_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
             return self._fail(eid, f"실행 기록 또는 manifest 없음: {error}")
-        if not any(row["exit_code"] == 0 and row["protocol_sha256"] == approved_hash for row in audit):
+        # 재개 때는 이전 시도의 성공 기록도 인정한다(실험 코드가 기존 산출물 덮어쓰기를 막아 다시 돌릴 수 없다).
+        # 다만 지금 코드로 돌린 기록만 인정한다. 구현 단계로 되돌아가 코드를 고쳤으면 예전 결과는 낡았다.
+        code_now = code_sha256(d)
+        # shortcut: 코드 해시가 없는 예전 기록(11-16 이전, EXP-001)은 그 기록 이후 코드가 안 바뀐 경우만 인정한다. 그런 기록이 없어지면 지운다.
+        legacy_ok = all(p.stat().st_mtime < audit_mtime for p in (d / "code").rglob("*") if p.is_file())
+
+        def counts(row: dict) -> bool:
+            same_code = row["code_sha256"] == code_now if "code_sha256" in row else legacy_ok
+            return row["exit_code"] == 0 and row["protocol_sha256"] == approved_hash and same_code
+
+        if not any(counts(row) for row in audit):
             return self._fail(eid, "승인된 본 실행 명령의 성공 기록이 없음")
         if manifest.get("protocol_sha256") != approved_hash:
             return self._fail(eid, "run_manifest.json이 승인된 실행 명세와 일치하지 않음")
@@ -568,7 +748,10 @@ class Lab:
         self._say(eid, f"{label('developer')} 전체 분석 시작")
         prompt = (self._header(exp, "analyze(전체 분석)") +
                   "\n\n실험 결과 전체를 대상으로 plan.md 의 분석 계획을 구현·실행하세요. 데이터 품질 점검을 먼저 하고, "
-                  "산출물은 results/derived/ 에 저장하세요(analysis_summary.json 포함). 끝나면 `finish_build`.")
+                  "산출물은 results/derived/ 에 저장하세요(analysis_summary.json 포함). 끝나면 `finish_build`.\n\n"
+                  "## 명령 승인\n이 단계부터 승인 목록에 없는 명령은 실행이 거부됩니다. 분석 스크립트를 다 쓴 뒤 실행할 명령을 "
+                  "`request_command_approval`로 한 번에 묶어 요청하세요(재학습 없는 재집계는 버튼 한 번). 읽기 전용 점검(ls, head, wc, grep 등)은 바로 됩니다. "
+                  "plan.md 끝의 '자문 확인값' 표의 값(단계별 중복 건수 등)이 results/derived/ 또는 results/data_checks/ 에 남도록 하세요.")
         res = self._call(eid, "developer", prompt, network=network, host=host)
         b = res.terminal
         if not b:
@@ -620,7 +803,8 @@ class Lab:
             self._call(eid, "developer", self._header(exp, "fix(분석 수정·재실행)") +
                        "\n\n## 검증 지적\n" + fmt_issues(by.get("developer", [])) +
                        ("\n\n(실험이 다시 실행되어 결과가 바뀌었을 수 있으니 전체 분석을 다시 실행하세요.)" if changed else "") +
-                       "\n\n수정 후 분석을 다시 실행하고 `finish_build`로 제출하세요.", network=network, host=host)
+                       "\n\n수정 후 분석을 다시 실행하고 `finish_build`로 제출하세요. 새 명령은 실행 전에 `request_command_approval`로 "
+                       "승인받으세요(승인 목록 밖 명령은 거부됨).", network=network, host=host)
             changed = True
         roles_all = self._meta(eid).get("consult") or list(CONSULTANTS)
         targets = set(roles_all) if changed else set()
@@ -642,8 +826,14 @@ class Lab:
         report: dict = {}
         review: dict = {}
         rnd = 0
+        consult_arts = set(self._meta(eid).get("consult_artifacts") or [])
+        late = [a for a in note_artifacts(d) if a not in consult_arts]
+        if late and promote_notes(d, late, "interpret"):
+            self._say(eid, f"해석 단계 점검 산출물 {len(late)}개를 results/data_checks/interpret/ 로 옮김(검증 담당 재계산 대상)")
+        cv = consult_values(d)
+        guide = self._report_guide(cv)
         for rnd in range(1, MAX_REVIEW_ROUNDS + 1):
-            prompt = self._header(exp, "report(보고서 작성)" if rnd == 1 else f"report({rnd - 1}차 수정)")
+            prompt = self._header(exp, "report(보고서 작성)" if rnd == 1 else f"report({rnd - 1}차 수정)") + guide
             prompt += ("\n\n자료를 모두 읽고 `report/report.md` 를 작성한 뒤 `finish_report`로 제출하세요." if rnd == 1 else
                        "\n\n## 검증 담당의 지적\n" + fmt_issues(issues) +
                        "\n\n담당자들이 갱신한 결과·해석(notes/, report/interpretation_*.md, results/derived/)을 다시 읽고 "
@@ -653,10 +843,17 @@ class Lab:
                 raise RuntimeError("서류화 담당이 보고서를 제출하지 않고 종료함: " + _short(res.text, 300))
             report = res.terminal
             self._say(eid, f"{label('documenter')} 보고서 {'초안' if rnd == 1 else f'{rnd - 1}차 수정본'} 작성 → 검증 요청")
+            self._apply_analysis_notes(self.ledger.get(eid))
 
             vres = self._call(eid, "tester", self._header(exp, f"verify({rnd}차 검증)") +
                               "\n\n보고서·코드·결과를 독립적으로 검증하고 `submit_review`로 제출하세요. "
-                              "핵심 수치는 원자료에서 직접 재계산하세요.", network=network, host=host)
+                              "핵심 수치는 원자료에서 직접 재계산하세요."
+                              + ("\n\n## 자문 확인값 대조 점검\nplan.md 끝 '자문 확인값' 표의 값마다 보고서 '## 자문 확인값 대조' 절의 최종 값을 "
+                                 "results/(results/data_checks/ 포함)에서 재계산해 확인하세요. 자문 값과 달라졌는데 이유가 없거나, "
+                                 "요청서의 질문에 답하는 값(예: 중복 제거 후 재계산)이 빠졌으면 major 입니다." if cv else "")
+                              + "\n승인 기록은 notes/approved_change_*.md(무거운 승인)와 notes/approved_command_R-*.md(경량 승인)에 있습니다. "
+                                "승인 목록 밖 명령은 코드로 실행이 막히므로, 둘 다에 없는 실행 흔적이 보이면 critical 로 보고하세요.",
+                              network=network, host=host)
             review = vres.terminal or {"verdict": "unverified", "issues": [], "checks_run": [],
                                        "summary": "검증 담당이 판정을 제출하지 않음 — 검증 미완료"}
             (d / "review" / f"review_{rnd}.json").write_text(json.dumps(review, ensure_ascii=False, indent=2),
@@ -676,6 +873,46 @@ class Lab:
         if review["verdict"] != "pass" or unresolved:
             return self._fail(eid, f"검증 미완료: 판정 {review['verdict']}, 미해결 주요 지적 {len(unresolved)}건")
         return self._finish(eid, report, review, rnd, unresolved)
+
+    def _report_guide(self, cv: list[dict]) -> str:
+        g = ["", "", "## 이번 보고서의 필수 항목"]
+        if cv:
+            g.append(f"- `## {CONSULT_SECTION}` 절: plan.md 끝 '자문 확인값' 표의 {len(cv)}개 값을 하나씩 표로 대조한다. "
+                     "열: 항목 / 자문 값 / 최종 값(results/ 출처 파일) / 상태(재현·변경·미재현) / 달라진 이유. "
+                     "자문 값 숫자를 그대로 적어야 하며, 빠진 값이 있으면 finish_report 가 거부된다. 핵심 발견은 결론 절까지 이어지게 쓴다.")
+        g.append("- results/data_checks/ 의 값은 인용할 수 있다. verification.md 에서 재실행 확인된 것은 '자문 단계 점검, 재실행 확인', "
+                 "확인 전인 것은 '(자문 단계 점검, 미검증)'으로 표기한다.")
+        g.append("- results/analysis_notes.md 를 고쳐야 하면 직접 고치지 말고 notes/analysis_notes_proposed.md 에 새 내용을 쓴다. "
+                 "제출 직후 백엔드 개발자가 results/ 수치와 대조해 교체한다(자동).")
+        g.append("- 계획서에 #성능고도화 게시 항목이 있거나 이번 실험에서 에이전트가 배운 요령·실수 패턴이 있으면 `post_perf_report`로 올리고, "
+                 "게시 여부를 보고서에 적는다(기록: notes/perf_reports.jsonl).")
+        return "\n".join(g)
+
+    def _apply_analysis_notes(self, exp: dict) -> None:
+        """서류화 담당이 notes/analysis_notes_proposed.md 를 내면 개발자가 대조·교체한다(사람 손 기다리지 않음)."""
+        eid = exp["id"]
+        d = self.cfg.experiments_dir / eid
+        prop = d / "notes" / "analysis_notes_proposed.md"
+        if not prop.is_file():
+            return
+        digest = hashlib.sha256(prop.read_bytes()).hexdigest()
+        if self._meta(eid).get("analysis_notes_applied") == digest:
+            return
+        network, host = self._perms(exp)
+        self._say(eid, f"{label('developer')} 분석 메모 교체(자동 할 일): notes/analysis_notes_proposed.md → results/analysis_notes.md")
+        prev = d / "results" / "analysis_notes.md"
+        if prev.is_file():
+            n = len(list((d / "notes").glob("analysis_notes_prev_*.md"))) + 1
+            shutil.copy2(prev, d / "notes" / f"analysis_notes_prev_{n}.md")
+        res = self._call(eid, "developer", self._header(exp, "fix(분석 메모 교체)") +
+                         "\n\n서류화 담당이 notes/analysis_notes_proposed.md 에 분석 메모 새 내용을 냈다. 안의 모든 수치를 results/ "
+                         "파일과 대조하고, 맞는 내용으로 results/analysis_notes.md 를 교체하세요(이전 내용은 notes/analysis_notes_prev_*.md 에 보존됨). "
+                         "results/ 와 다른 수치는 results/ 값으로 고쳐 쓰고, 대조표(수치, 출처 파일, 일치 여부)를 notes/analysis_notes_replace.md 에 쓰세요. "
+                         "새 분석을 돌리지 마세요. 끝나면 `finish_build`.", network=network, host=host)
+        b = res.terminal or {"status": "partial", "summary": _short(res.text, 300)}
+        if b.get("status") == "ready":
+            self._set_meta(eid, analysis_notes_applied=digest)
+        self._say(eid, f"{label('developer')} 분석 메모 교체 {b.get('status')}: {_short(b.get('summary', ''), 300)}")
 
     @staticmethod
     def _append_review_section(path: Path, review: dict, rounds: int, unresolved: list[dict]) -> None:

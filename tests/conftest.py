@@ -23,6 +23,7 @@ class ScriptedClient:
         self.lock = threading.Lock()
         self.tokens = tokens_per_call
         self.calls: list[str] = []
+        self.prompts: list[tuple[str, str]] = []   # (역할, 첫 user 글)
         self.messages = self
         self._n = 0
 
@@ -31,6 +32,8 @@ class ScriptedClient:
         role = m.group(1)
         with self.lock:
             self.calls.append(role)
+            first = kw["messages"][0]["content"]
+            self.prompts.append((role, first if isinstance(first, str) else str(first)))
             q = self.script.get(role)
             if not q:
                 raise AssertionError(f"스크립트에 {role} 의 남은 턴이 없음 (호출 순서 {self.calls})")
@@ -55,6 +58,7 @@ def T(name, **inp):
 @pytest.fixture
 def make_lab(tmp_path):
     def _make(script, *, tokens=100, **cfg_over):
+        cfg_over.setdefault("light_approval", "auto")      # 경량 승인 버튼을 누를 사람이 없으니 테스트는 자동 승인(기록은 남음)
         cfg = dataclasses.replace(Config.from_env(), lab_home=tmp_path / "lab", sandbox_backend="host",
                                   anthropic_api_key=None, **cfg_over)
         cfg.ensure_dirs()

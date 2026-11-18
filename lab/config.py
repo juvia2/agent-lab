@@ -63,6 +63,9 @@ class Config:
     perf_channel: str             # 에이전트 성능 향상(학습·테스트) 리포트 전용. 연구 진행 채널과 분리
     test_channel: str             # 봇 접속·권한·개발 점검 전용
     adhoc_channel: str            # 실험과 무관한 단건 의뢰(담당자에게 직접 질의·잡무)
+    reading_channel: str          # 논문 리딩(전원 리딩 리포트·튜터 과외·연구 지향 누적, lab/reading.py)
+    reading_dirs: tuple           # #논문리딩에서 경로로 받을 수 있는 맥 폴더(READING_DIRS, 쉼표 구분)
+    reading_parallel: int         # 리딩 리포트 동시 작성 수(구독 한도 보호)
     adhoc_timeout_min: int        # 의뢰 1건의 명령 실행 상한(분). 넘는 일은 #실험요청으로
     adhoc_read_dirs: tuple        # 의뢰에서 읽기 전용으로 열람 가능한 맥 폴더(쉼표 구분 .env ADHOC_READ_DIRS)
     learn_threshold: int          # 같은 학습 후보가 이 횟수만큼 쌓이면 연구자 확인 요청
@@ -91,6 +94,9 @@ class Config:
     local_base_url: str
     local_model: str
     local_api_key: str
+    light_approval: str = "button"        # 재집계·점검 명령 경량 승인: button(연구자 버튼) | auto(기록만 남기고 자동 승인)
+    light_approval_timeout_min: int = 60  # 경량 승인 대기 상한(분). 넘으면 실행하지 않고 남은 일로 넘긴다
+    sandbox_threads: int = 1              # 샌드박스 OMP/MKL/OPENBLAS 스레드 기본값(재현성·CPU 과점 방지)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -107,6 +113,10 @@ class Config:
             perf_channel=e("PERF_CHANNEL", "성능고도화"),
             test_channel=e("TEST_CHANNEL", "봇점검"),
             adhoc_channel=e("ADHOC_CHANNEL", "의뢰"),
+            reading_channel=e("READING_CHANNEL", "논문리딩"),
+            reading_dirs=tuple(Path(x.strip()).expanduser().resolve()
+                               for x in e("READING_DIRS", "~/Documents,~/Downloads,~/Desktop").split(",") if x.strip()),
+            reading_parallel=_int("READING_PARALLEL", 3) or 3,
             adhoc_timeout_min=_int("ADHOC_TIMEOUT_MIN", 10) or 10,
             adhoc_read_dirs=tuple(Path(x.strip()).expanduser().resolve()
                                   for x in e("ADHOC_READ_DIRS", "").split(",") if x.strip()),
@@ -136,6 +146,9 @@ class Config:
             local_base_url=e("LOCAL_BASE_URL", "http://localhost:11434/v1"),
             local_model=e("LOCAL_MODEL", ""),
             local_api_key=e("LOCAL_API_KEY", ""),
+            light_approval=e("LIGHT_APPROVAL", "button"),
+            light_approval_timeout_min=_int("LIGHT_APPROVAL_TIMEOUT_MIN", 60) or 60,
+            sandbox_threads=_int("SANDBOX_THREADS", 1) or 1,
         )
 
     # --- 경로 ---

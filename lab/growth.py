@@ -18,10 +18,14 @@ import threading
 import time
 from pathlib import Path
 
-KINDS = ("preference", "lesson")      # preference: 연구자 성향(전원 공유) / lesson: 그 역할의 업무 요령
-CATEGORIES = ("보고형식", "분석방법", "코드", "데이터", "커뮤니케이션", "도메인", "기타")
+KINDS = ("preference", "lesson", "research")
+# preference: 연구자 성향(전원 공유) / lesson: 그 역할의 업무 요령
+# research: 연구자의 연구 지향(관심·이론적 입장·방법론·배경지식, 전원 공유). 주로 #논문리딩에서 쌓인다(reading.py)
+CATEGORIES = ("보고형식", "분석방법", "코드", "데이터", "커뮤니케이션", "도메인", "기타",
+              "연구관심", "이론적입장", "방법론", "배경지식", "읽기방식")
 PROFILE_LIMIT = 1800                  # 프롬프트에 붙는 성향 블록 상한(자)
 LESSON_LIMIT = 1200                   # 역할별 요령 블록 상한(자)
+RESEARCH_LIMIT = 1500                 # 연구 지향 블록 상한(자)
 OPEN_LIMIT = 15                       # 의뢰 중 보여 줄 열린 후보 수
 
 _lock = threading.Lock()
@@ -71,7 +75,7 @@ def record(cfg, *, role: str, kind: str, text: str, category: str = "기타", st
     category = category if category in CATEGORIES else "기타"
     if not text and not candidate_id:
         raise ValueError("text 가 비었음")
-    scope = "all" if kind == "preference" else role
+    scope = role if kind == "lesson" else "all"
     pf, cf, _ = _paths(cfg)
     with _lock:
         if stated:
@@ -110,6 +114,22 @@ def record(cfg, *, role: str, kind: str, text: str, category: str = "기타", st
                 out = {"status": "new", "id": cid, "text": text, "count": 1}
     log_event(cfg, {"type": "learning", "source": source, "role": role, "kind": kind, "stated": stated,
                     "category": category, "text": text, "result": out["status"], "id": out["id"]})
+    return out
+
+
+def propose(cfg, *, role: str, text: str, category: str = "기타", evidence: str = "", source: str = "review") -> dict:
+    """실험 채점·회고에서 나온 요령을 연구자 확인 대기 후보로 올린다(반복 관찰 기준을 채운 상태, `/learn approve` 로 확정)."""
+    out = record(cfg, role=role, kind="lesson", text=text, category=category, evidence=evidence, source=source)
+    if out["id"] and out["status"] != "ignored":
+        _, cf, _ = _paths(cfg)
+        with _lock:
+            cands = _load(cf, {})
+            c = cands.get(out["id"])
+            if c and c["status"] == "open" and c["count"] < cfg.learn_threshold:
+                c["count"], c["updated"] = cfg.learn_threshold, _now()
+                c["proposed_by"] = source
+                _save(cf, cands)
+                out["count"], out["status"] = c["count"], "due"
     return out
 
 
@@ -185,11 +205,14 @@ def summary(cfg) -> str:
     items = profile_items(cfg)
     prefs = [i for i in items if i["kind"] == "preference"]
     lessons = [i for i in items if i["kind"] == "lesson"]
+    research = [i for i in items if i["kind"] == "research"]
     lines = [f"**연구자 성향 ({len(prefs)})**"]
     lines += [f"`{i['id']}` [{i['category']}] {i['text']} _({'직접 말함' if i['source'] == 'stated' else '확인됨'})_"
               for i in prefs] or ["(없음)"]
     lines += ["", f"**역할별 업무 요령 ({len(lessons)})**"]
     lines += [f"`{i['id']}` {i['scope']}: {i['text']}" for i in lessons] or ["(없음)"]
+    lines += ["", f"**연구 지향 ({len(research)})** — 논문 리딩에서 쌓임, 자세히는 `/reading lens`"]
+    lines += [f"`{i['id']}` [{i['category']}] {i['text']}" for i in research] or ["(없음)"]
     d = due(cfg)
     lines += ["", f"**확인 대기 ({len(d)})** — `/learn approve L-###` · `/learn reject L-###`"]
     lines += [f"`{c['id']}` ({c['count']}회, {c['scope']}) {c['text']}" for c in d] or ["(없음)"]
@@ -235,10 +258,14 @@ def _context(cfg, role: str, include_open: bool) -> str:
     items = profile_items(cfg, role)
     prefs = [f"- [{i['category']}] {i['text']}" for i in items if i["kind"] == "preference"]
     lessons = [f"- {i['text']}" for i in items if i["kind"] == "lesson" and i["scope"] == role]
+    research = [f"- [{i['category']}] {i['text']}" for i in items if i["kind"] == "research"]
     parts = []
     if prefs:
         parts.append("## 연구자 성향 (누적 학습, 연구자 확인됨 — 기본값으로 따른다. 이번 요청이 다르게 말하면 요청이 우선)\n"
                      + _fit(prefs, PROFILE_LIMIT))
+    if research:
+        parts.append("## 연구자의 연구 지향 (논문 리딩·대화에서 누적, 연구자 확인됨 — 설계·해석·설명의 기본 맥락으로 쓴다. "
+                     "연구자의 입장이지 사실이 아니므로 근거 판단을 대신하지 않는다)\n" + _fit(research, RESEARCH_LIMIT))
     if lessons:
         parts.append("## 당신의 업무 요령 (지난 작업에서 확인된 것)\n" + _fit(lessons, LESSON_LIMIT))
     if include_open:

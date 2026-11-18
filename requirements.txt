@@ -2,3 +2,4 @@ discord.py>=2.4
 python-dotenv>=1.0
 # anthropic>=0.40   # 선택: ROUTE_* 에 `api`(토큰 과금)를 직접 적을 때만 필요
 pypdf>=4.0          # #의뢰에 첨부된 PDF 를 팀원이 읽을 수 있게 텍스트로 뽑는다(없어도 동작)
+certifi>=2023.0     # 맥 python.org 파이썬의 HTTPS 인증서(#논문리딩 링크 받기)

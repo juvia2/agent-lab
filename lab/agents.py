@@ -6,17 +6,17 @@ from .config import ROOT
 _RULES_PATH = ROOT / "LAB_RULES.md"
 _STT_KNOWLEDGE = ROOT / "knowledge" / "korean_stt"
 
-# 역할 키 → (이모지, 표시 이름, 모델 종류)
+# 역할 키 → (표시 이름, 모델 종류). 이름 앞 이모지는 쓰지 않는다(2026-11-16 연구자 지시)
 ROLE_META = {
-    "linguist": ("🗣️", "언어학 전문가", "thinker"),
-    "cogsci": ("🧠", "인지·뇌과학 연구원", "thinker"),
-    "lm": ("🤖", "언어모델 연구원", "thinker"),
-    "statistician": ("📊", "통계·실험설계 전문가", "thinker"),
-    "corpus": ("🗂️", "코퍼스·데이터 전문가", "thinker"),
-    "practitioner": ("🔧", "실험 실무 담당", "runner"),
-    "developer": ("🛠️", "백엔드 개발자", "thinker"),
-    "documenter": ("📝", "서류화·보고 담당", "thinker"),
-    "tester": ("✅", "검증 테스트 담당", "thinker"),
+    "linguist": ("언어학 전문가", "thinker"),
+    "cogsci": ("인지·뇌과학 연구원", "thinker"),
+    "lm": ("언어모델 연구원", "thinker"),
+    "statistician": ("통계·실험설계 전문가", "thinker"),
+    "corpus": ("코퍼스·데이터 전문가", "thinker"),
+    "practitioner": ("실험 실무 담당", "runner"),
+    "developer": ("백엔드 개발자", "thinker"),
+    "documenter": ("서류화·보고 담당", "thinker"),
+    "tester": ("검증 테스트 담당", "thinker"),
 }
 
 
@@ -29,11 +29,11 @@ DISPLAY_EN = {
 
 
 def label(role: str) -> str:
-    return ROLE_META[role][1]             # 이모지 없이 직책만(2026-11-16 연구자 지시)
+    return ROLE_META[role][0]
 
 
 def model_for(cfg, role: str) -> str:
-    kind = ROLE_META[role][2]
+    kind = ROLE_META[role][1]
     return cfg.model_runner if kind == "runner" else cfg.model_thinker
 
 
@@ -162,6 +162,7 @@ PRACTITIONER = """[ROLE:practitioner]
 3. 계획서에 반드시 포함: 연구 질문과 가설(예측 방향), 데이터·자극과 교란 통제, 조건·모델·시드 수, 지표,
    통계 분석 계획(검정, 다중비교 보정, 신뢰구간 방법), 해석 기준(어떤 결과면 지지/기각), 구현 요구사항(개발자에게 줄 명세),
    예상 실행 시간, 자원 요구, 위험 요소. 본 실행 명령의 정확한 문자열을 `run_commands`에 넣어 승인받는다.
+   자문이 낸 수치·건수는 `consult_values`(자문 확인값)로 빠짐없이 옮긴다. 계획의 정의 때문에 값이 바뀔 것이면(예: 100→90) 차이와 이유를 적는다.
 4. 샌드박스는 기본적으로 **CPU 전용**이고 네트워크가 막혀 있다. 모델·데이터 다운로드가 필요하면 `needs_network=true`,
    맥 GPU(MPS)가 꼭 필요하면 `needs_host_accel=true`로 선언한다(둘 다 연구자 승인 필요). 작은 모델/표본으로 가능하면 그쪽을 우선한다.
 5. `finish_plan`으로 제출한다. 계획서는 실행 전에 고정되는 사전등록에 가깝게 쓴다. 코드는 쓰지 않는다.
@@ -198,6 +199,8 @@ plan.md 의 구현 요구사항대로 구현한다. 작은 입력으로 끝까�
 실험 결과 **전체**(표본 일부가 아니라)를 대상으로 plan.md 의 분석 계획을 구현·실행한다. 분석 코드는 `code/analysis/` 에 두고,
 산출물은 `results/derived/` 에 저장한다(집계 표 CSV, 통계 결과 JSON, 요약 `analysis_summary.json`, 그림). 계획에 없던 분석은 "탐색적"으로 이름 붙인다.
 데이터 품질 점검(결측, 이상치, 중복, 조건별 표본 수)을 먼저 하고 결과를 기록한다. 해석은 하지 않는다(해석은 전문가 몫).
+본 실행 이후(analyze·fix)에는 승인 목록 밖 명령이 코드로 거부된다. 실행할 명령은 스크립트를 다 쓴 뒤 `request_command_approval`로 한 번에 묶어 요청한다.
+읽기 전용 점검(ls, cat, head, wc, grep 등)은 승인 없이 된다. 기존 산출물은 덮어쓰지 말고 새 파일·새 폴더에 쓴다.
 
 ### fix 단계
 검증 담당이 지적한 코드·결과 오류를 원인부터 확인해서 고치고 다시 실행한다. 지적이 틀렸다고 판단하면 근거와 함께 `notes/fix_response.md` 에 쓴다."""
@@ -219,6 +222,9 @@ report/interpretation_*.md(전문가 해석), 필요하면 과거 실험.
 - 부정적·불분명한 결과를 숨기거나 완곡하게 바꾸지 않는다. 전문가가 지적한 우려는 보고서에 남긴다.
 - 그림은 `report/figures/` 에 있는 것만 참조한다.
 - 검증 담당의 지적이 오면 하나씩 고치고, 동의하지 않으면 이유를 보고서에 적는다.
+- plan.md 끝 '자문 확인값' 표가 있으면 `## 자문 확인값 대조` 절에 값마다 최종 값·출처·상태(재현·변경·미재현)·이유를 적는다. 빠지면 제출이 거부된다.
+- results/ 에 쓸 수 없으니 results/analysis_notes.md 수정안은 notes/analysis_notes_proposed.md 에 쓴다(개발자가 자동으로 대조·교체).
+- #성능고도화 게시가 필요하면 `post_perf_report`로 직접 올리고, 게시 여부를 보고서에 적는다.
 - 완성되면 `finish_report`로 제출한다. attachments 에는 보고서와 핵심 그림·표만 넣는다."""
 
 TESTER = """[ROLE:tester]

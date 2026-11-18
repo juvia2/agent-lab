@@ -11,7 +11,7 @@ from pathlib import Path
 import discord
 from discord import app_commands
 
-from . import bus, growth, learning, memory
+from . import bus, growth, learning, memory, reading
 from .ledger import ACTIVE
 from .notify import Notifier
 from .policy import blocked_text, load_policy, set_policy
@@ -78,9 +78,12 @@ _EMOJI = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u21A9\u21
                     r"(?:\uFE0F|\u200D[\U0001F000-\U0001FAFF\u2600-\u27BF])*\uFE0F? ?")
 
 
+KEEP_EMOJI = ("⚠", "📌")                  # 주의·핵심 표시만 허용(LAB_RULES 표기, 2026-11-16 연구자 지시)
+
+
 def strip_emoji(text: str) -> str:
-    """디스코드에 올리는 글에서 이모지를 지운다(2026-11-16 연구자 지시). 화살표(→)·괄호 기호는 남긴다."""
-    return _EMOJI.sub("", text or "")
+    """디스코드에 올리는 글에서 이모지를 지운다(2026-11-16 연구자 지시). ⚠️·📌 와 화살표(→)·괄호 기호는 남긴다."""
+    return _EMOJI.sub(lambda m: m.group(0) if m.group(0).startswith(KEEP_EMOJI) else "", text or "")
 
 
 def chunks(text: str, n: int = MAX_LEN) -> list[str]:
@@ -133,6 +136,35 @@ class ApprovalButton(discord.ui.DynamicItem[discord.ui.Button],
         await interaction.response.edit_message(content=f"{base}\n\n→ {msg}", view=None)
 
 
+class CommandApprovalButton(discord.ui.DynamicItem[discord.ui.Button],
+                            template=r"lab:cmd:(?P<action>ok|no):(?P<exp>EXP-\d+):(?P<rid>R-\d+)"):
+    """경량 승인(재학습 없는 재집계·점검 명령) 버튼. 결정은 approvals 파일에 남고 대기 중인 에이전트가 이어간다."""
+    def __init__(self, action: str, exp_id: str, rid: str):
+        ok = action == "ok"
+        super().__init__(discord.ui.Button(
+            label="명령 승인" if ok else "거부",
+            style=discord.ButtonStyle.success if ok else discord.ButtonStyle.danger,
+            custom_id=f"lab:cmd:{action}:{exp_id}:{rid}"))
+        self.action, self.exp_id, self.rid = action, exp_id, rid
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item, match, /):
+        return cls(match["action"], match["exp"], match["rid"])
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != interaction.client.cfg.discord_owner_id:
+            await interaction.response.send_message("연구자 본인만 승인할 수 있습니다.", ephemeral=True)
+            return False
+        return True
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        bus.emit(interaction.client.cfg, "command", root="CMD",
+                 text=f"명령 {'승인' if self.action == 'ok' else '거부'} 버튼 {self.exp_id} {self.rid}")
+        msg = await asyncio.to_thread(interaction.client.lab.decide_command, self.exp_id, self.rid, self.action == "ok")
+        base = (interaction.message.content or "")[:1500]
+        await interaction.response.edit_message(content=f"{base}\n\n→ {msg}", view=None)
+
+
 class LabTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.client.cfg.discord_owner_id:
@@ -181,6 +213,20 @@ class DiscordNotifier(Notifier):
             log.warning("%s 승인 요청 디스코드 전송 차단: 로컬 콘솔에서 확인 필요", exp["id"])
             return
         self._run(self._ask(exp, reasons, plan_summary))
+
+    def ask_command_approval(self, exp, req):
+        if not load_policy(self.cfg, exp["id"]).allows_discord:
+            log.warning("%s 명령 승인 요청 디스코드 전송 차단: 콘솔에서 approve %s", exp["id"], exp["id"])
+            return
+        self._run(self._ask_command(exp, req))
+
+    async def _ask_command(self, exp, req):
+        from .notify import command_approval_text
+        ch = await self._channel_for(exp)
+        view = discord.ui.View(timeout=None)
+        view.add_item(CommandApprovalButton("ok", exp["id"], req["id"]))
+        view.add_item(CommandApprovalButton("no", exp["id"], req["id"]))
+        await self._send(ch, f"<@{self.cfg.discord_owner_id}> " + command_approval_text(exp, req), view=view)
 
     # ---- 비동기 구현 ----
     async def _channel_for(self, exp):
@@ -235,6 +281,9 @@ class DiscordNotifier(Notifier):
                 return
             except discord.DiscordException:
                 log.warning("%s 봇으로 전송 실패 → 연구실장 봇이 대신 보냄", role)
+        if role:                          # 연구실장 봇이 대신 올리면 누구의 글인지 밝힌다
+            from .agents import label
+            text = f"**{label(role)}**\n{text}"
         await self._send(ch, text, files)
 
     async def _post_named(self, name, text, files):
@@ -269,13 +318,14 @@ class LabBot(discord.Client):
         notifier.members = {m.role: m for m, _ in self.members}
         for m, _ in self.members:             # 팀원이 #의뢰에서 실험 수준의 일을 받으면 연구실장이 옮겨 접수한다
             m.promote = self._promote_to_experiment
+            m.save_reading_inputs = self._save_reading_inputs
             m.recall = self._recent_context   # 팀원 봇은 멘션 안 된 글을 못 읽는다. 연구실장 봇이 최근 대화·첨부를 대신 읽어 준다
         self._member_tasks: list[asyncio.Task] = []
         self._register_commands()
 
     # ---- 시작 ----
     async def setup_hook(self):
-        self.add_dynamic_items(ApprovalButton)
+        self.add_dynamic_items(ApprovalButton, CommandApprovalButton)
         for member, token in self.members:     # 팀원 봇들은 같은 이벤트 루프에서 접속한다
             self._member_tasks.append(asyncio.create_task(self._run_member(member, token)))
         if self.cfg.discord_guild_id:
@@ -326,7 +376,7 @@ class LabBot(discord.Client):
 
     async def _ensure_channels(self):
         names = [self.cfg.intake_channel, self.cfg.perf_channel, self.cfg.test_channel, self.cfg.report_channel,
-                 self.cfg.adhoc_channel]
+                 self.cfg.adhoc_channel, self.cfg.reading_channel]
         for g in self.guilds:
             if self.cfg.discord_guild_id and g.id != self.cfg.discord_guild_id:
                 continue
@@ -425,7 +475,8 @@ class LabBot(discord.Client):
             return
         if self.registry is not None:
             team = {u.id for u in message.mentions if u.id in self.registry.by_user}
-            if team and self.user.id not in team:     # 다른 팀원을 불렀으면 그 팀원이 답한다
+            top_reading = isinstance(message.channel, discord.TextChannel) and self._is_reading(message.channel)
+            if team and self.user.id not in team and not top_reading:   # 다른 팀원을 불렀으면 그 팀원이 답한다
                 return
         ch = message.channel
         text = (message.content or "").strip()
@@ -434,9 +485,13 @@ class LabBot(discord.Client):
         if not self._listens(ch, message):         # 연구실 채널·그 스레드·DM·멘션이 아니면 조용히 넘어간다
             return
         exp = self.lab.ledger.find_by_thread(ch.id) if isinstance(ch, discord.Thread) else None
-        policy_id = exp["id"] if exp else ("ADHOC" if self._is_adhoc(ch) else "INTAKE")
+        policy_id = exp["id"] if exp else ("ADHOC" if self._is_adhoc(ch) else
+                                           "READING" if self._is_reading(ch) else "INTAKE")
         if not load_policy(self.cfg, policy_id).allows_discord:
             await message.channel.send(blocked_text(policy_id))
+            return
+        if self._is_reading(ch):                  # #논문리딩: 세션 시작·튜터에게 넘기기·마무리
+            await self._reading(message)
             return
         thread_id = None
         target = None
@@ -494,7 +549,339 @@ class LabBot(discord.Client):
             return True
         base = ch.parent if isinstance(ch, discord.Thread) else ch
         return getattr(base, "name", None) in {self.cfg.intake_channel, self.cfg.report_channel, self.cfg.perf_channel,
-                                               self.cfg.test_channel, self.cfg.adhoc_channel}
+                                               self.cfg.test_channel, self.cfg.adhoc_channel, self.cfg.reading_channel}
+
+    def _is_reading(self, ch) -> bool:
+        if isinstance(ch, discord.Thread):
+            return bool(ch.parent) and ch.parent.name == self.cfg.reading_channel
+        return isinstance(ch, discord.TextChannel) and ch.name == self.cfg.reading_channel
+
+    # ---- #논문리딩 ----
+    async def _reading(self, message: discord.Message):
+        ch = message.channel
+        store = reading.ReadingStore(self.cfg)
+        if isinstance(ch, discord.Thread):
+            sess = store.find_by_thread(ch.id)
+            if sess:
+                await self._reading_followup(message, sess)
+                return
+        text = (message.content or "").strip()
+        has_pdf = any(a.filename.lower().endswith(reading.PAPER_EXT + (".zip",)) for a in message.attachments)
+        url = reading.find_url(text)
+        local = reading.find_local_path(text, self.cfg.reading_dirs)
+        if isinstance(ch, discord.TextChannel) and reading.wants_review(text, has_pdf or bool(local), url):
+            await self._review_start(message, url if url and not reading.pdf_url(url) else None, local)
+            return
+        if isinstance(ch, discord.TextChannel) and (has_pdf or local or (url and reading.pdf_url(url))):
+            await self._reading_start(message, url if not (has_pdf or local) else None, local)
+            return
+        if isinstance(ch, discord.TextChannel) and re.search(r"(^|\s)(~/|/Users/|/Volumes/)", text):
+            await message.reply("그 폴더를 읽을 수 없습니다. 맥의 " + ", ".join(str(d) for d in self.cfg.reading_dirs)
+                                + " 안의 경로만 받습니다(.env READING_DIRS). 또는 폴더를 .zip 으로 묶거나 파일을 여러 개 첨부해 주세요.",
+                                mention_author=False)
+            return
+        # 논문 없이 쓴 글(예전에 읽은 논문 질문, 연구 지향 확인 등)은 연구실장이 리딩 기록을 찾아 답한다
+        target = ch
+        async with target.typing():
+            history = await self._history(target, message)
+            reply = await asyncio.to_thread(
+                self.director.reply, history, channel_id=ch.id, requester_id=message.author.id, policy_id="READING",
+                extra_system=f"\n\n---\n## 지금은 #{self.cfg.reading_channel} 채널이다\n연구자가 공부용 논문을 튜터들과 같이 읽는 채널이다. "
+                             "논문 PDF나 arXiv 링크를 올리면 세션이 열린다. 예전에 읽은 논문을 물으면 search_research_memory 의 "
+                             "'논문 리딩 노트'를 찾아 출처와 함께 답한다.\n\n" + reading.trend_text(self.cfg, 8))
+        for part in chunks(reply):
+            await target.send(part)
+
+    async def _save_reading_inputs(self, message: discord.Message, pid: str) -> list[str]:
+        d = reading.ReadingStore(self.cfg).dir(pid) / "inputs"
+        d.mkdir(parents=True, exist_ok=True)
+        saved = []
+        for a in message.attachments:
+            if a.size > MAX_UPLOAD:
+                continue
+            name = safe_name(a.filename)
+            await a.save(d / name)
+            if name.lower().endswith(".zip"):          # 논문 폴더를 묶은 zip: 논문 파일만 꺼낸다
+                got = await asyncio.to_thread(reading.extract_zip, d / name, d)
+                saved += got or [f"({name}: 논문 파일(PDF·텍스트·TeX)을 찾지 못함)"]
+            else:
+                saved.append(name)
+        saved += await self._pdf_texts(d)
+        return saved
+
+    async def _pdf_texts(self, d) -> list[str]:
+        """inputs/ 의 PDF 중 아직 텍스트를 안 뽑은 것을 뽑는다. 실패한 것만 안내 문구로 돌려준다."""
+        from .team import pdf_to_text
+        notes = []
+        for pdf in sorted(d.glob("*.pdf")):
+            if (d / (pdf.name + ".txt")).exists():
+                continue
+            if await asyncio.to_thread(pdf_to_text, pdf) is None:
+                notes.append(f"({pdf.name}: 텍스트를 뽑지 못함. 스캔본이면 본문 텍스트를 붙여 주세요)")
+        return notes
+
+    async def _reading_start(self, message: discord.Message, url: str | None, local=None):
+        store = reading.ReadingStore(self.cfg)
+        text = (message.content or "").strip()
+        pid = store.new(note=text, url=url or (str(local) if local else ""))
+        thread = await message.create_thread(name=f"{pid} 논문 리딩"[:100], auto_archive_duration=10080)
+        store.update(pid, thread_id=thread.id)
+        inputs = store.dir(pid) / "inputs"
+        inputs.mkdir(parents=True, exist_ok=True)
+        saved = await self._save_reading_inputs(message, pid)
+        if local is not None:                     # 맥 폴더 경로: 논문 파일만 읽기 전용으로 복사(원본은 그대로)
+            saved += await asyncio.to_thread(reading.copy_folder, local, inputs)
+            saved += await self._pdf_texts(inputs)
+        if url:
+            got = await asyncio.to_thread(reading.fetch_pdf, url, inputs / "paper.pdf")
+            if got:
+                saved.append("paper.pdf (링크에서 받음)")
+                saved += await self._pdf_texts(inputs)
+            else:
+                saved.append("(링크에서 PDF를 받지 못함)")
+        body = store.paper_text(pid)
+        store.log(pid, "연구자", text or "(논문만 올림)")
+        if not body:
+            await thread.send(f"{pid} 세션을 열었지만 논문 본문을 읽지 못했습니다({'; '.join(saved) or '첨부 없음'}). "
+                              "이 스레드에 PDF를 다시 올리거나 본문 텍스트를 붙인 뒤 `/reading retry` 를 써 주세요.")
+            return
+        ready = self._ready_roles()
+        ask = (f"[연구자가 논문과 함께 쓴 말]\n{text or '(없음)'}\n\n[논문 앞부분]\n{body[:7000]}\n\n"
+               + reading.trend_text(self.cfg, 8))
+        try:
+            out = await asyncio.to_thread(self.director.reply, [{"role": "user", "content": ask}],
+                                          requester_id=message.author.id, policy_id="READING", tools=[],
+                                          extra_system=reading.SELECT.format(channel=self.cfg.reading_channel))
+        except Exception:
+            log.exception("리딩 제목·담당 선정 오류")
+            out = ""
+        title, tags, tutors, note = reading.parse_select(out)
+        tutors = [r for r in tutors if r in ready] or [r for r in reading.TUTOR_POOL if r in ready][:2] or ["lm"]
+        store.update(pid, title=title, tags=tags, tutors=tutors, lead=tutors[0])
+        try:                                      # 스레드 이름 = 논문 제목(연구자 지시)
+            await thread.edit(name=(title or f"{pid} 논문 리딩")[:100])
+        except discord.DiscordException:
+            pass
+        from .agents import DISPLAY_EN
+        files = [f for f in store.files(pid) if not f.endswith(".pdf.txt")]
+        await thread.send(
+            f"{title or pid} ({pid})\n받은 파일: {', '.join(files)}"
+            + (f"\n주제: {', '.join(tags)}" if tags else "")
+            + f"\n연구실 10명이 각자 분야의 리딩 리포트를 씁니다. 리포트가 다 올라오면 이 스레드에서 자유롭게 질문하세요"
+              f"(멘션 없이 물으면 맞는 담당이 답하고, @이름 으로 지정할 수 있습니다). 질문 1차 담당: "
+            + ", ".join(DISPLAY_EN[r] for r in tutors)
+            + ". 다 읽으면 \"정리해줘\" 또는 `/reading close` 로 리딩 노트를 남깁니다.")
+        await self._reading_reports(thread, pid)
+
+    async def _review_start(self, message: discord.Message, url: str | None, local=None):
+        """연구자가 쓴 글(블로그 글·분석 문서)에 팀원들이 첨언한다. 글 안에 원 논문 링크가 있으면 원문도 받아 사실관계를 대조한다."""
+        store = reading.ReadingStore(self.cfg)
+        text = (message.content or "").strip()
+        pid = store.new(note=text, url=url or (str(local) if local else ""))
+        store.update(pid, kind="review")
+        thread = await message.create_thread(name=f"첨언 {pid}"[:100], auto_archive_duration=10080)
+        store.update(pid, thread_id=thread.id)
+        inputs = store.dir(pid) / "inputs"
+        inputs.mkdir(parents=True, exist_ok=True)
+        got_title = ""
+        if url:
+            got = await asyncio.to_thread(reading.fetch_page, url, inputs / "article.md")
+            if got:
+                got_title = got[0]
+            else:
+                await thread.send("그 링크의 글을 받지 못했습니다(비공개 글·로그인 필요·자바스크립트로만 그려지는 페이지일 수 있음). "
+                                  "글 본문을 이 스레드에 붙이거나 .md/.txt 로 첨부해 주세요.")
+        saved = await self._save_reading_inputs(message, pid)
+        if local is not None:
+            saved += await asyncio.to_thread(reading.copy_folder, local, inputs)
+            saved += await self._pdf_texts(inputs)
+        if not reading.article_text(self.cfg, pid):  # 링크가 없으면 첨부한 글(첫 텍스트 파일)이나 붙여 넣은 본문을 글로 쓴다
+            docs = [f for f in sorted(inputs.glob("*")) if f.suffix.lower() in (".md", ".txt") and not f.name.endswith(".pdf.txt")]
+            body = docs[0].read_text(encoding="utf-8", errors="replace") if docs else \
+                (text if len(text) > 800 else "")
+            if body:
+                (inputs / "article.md").write_text(body, encoding="utf-8")
+        art = reading.article_text(self.cfg, pid)
+        store.log(pid, "연구자", text or "(글만 올림)")
+        if not art:
+            if url:
+                return
+            await thread.send("첨언할 글 본문을 찾지 못했습니다. 글 링크나 본문(.md/.txt)을 올려 주세요.")
+            return
+        for link in reading.paper_links(art)[:1]:     # 글이 다루는 원 논문(글 속 첫 학술 링크)을 받아 사실관계 대조에 쓴다
+            dest = inputs / f"source_{len(list(inputs.glob('source_*.pdf'))) + 1}.pdf"
+            if await asyncio.to_thread(reading.fetch_pdf, link, dest):
+                saved.append(f"{dest.name} (글 속 원 논문 링크에서 받음)")
+        saved += await self._pdf_texts(inputs)
+        try:
+            out = await asyncio.to_thread(
+                self.director.reply, [{"role": "user", "content": f"[연구자가 쓴 말]\n{text or '(없음)'}\n\n[글 앞부분]\n{art[:5000]}"}],
+                requester_id=message.author.id, policy_id="READING", tools=[],
+                extra_system=reading.REVIEW_SELECT.format(channel=self.cfg.reading_channel))
+        except Exception:
+            log.exception("첨언 담당 선정 오류")
+            out = ""
+        title, tags, who, note = reading.parse_review_select(out)
+        named = [self.registry.by_user[u.id] for u in message.mentions
+                 if self.registry is not None and u.id in self.registry.by_user]
+        if named:                                  # @멘션한 팀원만 첨언(연구실장 포함 가능). 없으면 전원
+            who = [r for r in reading.REPORTERS if r in named]
+        title = title or got_title
+        ready = self._ready_roles() | {"director"}
+        tutors = [r for r in who if r in reading.TUTOR_POOL and r in ready] or ["linguist"]
+        store.update(pid, title=title, tags=tags, reviewers=who, tutors=tutors, lead=tutors[0])
+        try:
+            await thread.edit(name=f"첨언: {title}"[:100] if title else f"첨언 {pid}")
+        except discord.DiscordException:
+            pass
+        from .agents import DISPLAY_EN
+        src = reading.source_text(self.cfg, pid)
+        await thread.send(
+            f"첨언 세션 {pid}: {title or '(제목 미상)'}\n"
+            f"원 논문 대조: {'원문을 받아 대조합니다' if src else '원문을 받지 못해 글 기준으로만 봅니다(사실관계는 원문 미확인으로 표시)'}\n"
+            f"첨언: {', '.join(DISPLAY_EN[r] for r in who)}" + (f"\n{note}" if note else "")
+            + "\n첨언이 다 올라오면 이 스레드에서 이어서 반론하거나 더 물어보세요. \"전원\"을 넣어 물으면 모두가 각자 답하고, "
+              "@이름 으로 특정 팀원만 부를 수 있습니다. \"정리해줘\"로 첨언 요약 노트를 남깁니다.")
+        await self._reading_reports(thread, pid, who, mode="review")
+
+    async def _reading_reports(self, thread, pid: str, roles: list[str] | None = None, mode: str | None = None) -> None:
+        """연구실 10명 전원이 각자 리딩 리포트를 쓰고 자기 봇 이름으로 올린다. 실패하면 한 번 다시 쓰고,
+        그래도 안 되면 목록에 남겨 /reading retry 로 이어 쓴다. 봇이 접속해 있지 않아도 리포트는 쓰고 연구실장 봇이 대신 올린다."""
+        from .agents import DISPLAY_EN, director_system, label, model_for, system_for
+        from .team import past_readings
+        sess = reading.ReadingStore(self.cfg).get(pid) or {}
+        mode = mode or ("review" if sess.get("kind") == "review" else "report")
+        kind = "첨언" if mode == "review" else "리딩 리포트"
+        roles = roles or reading.missing_reports(self.cfg, pid)
+        policy = load_policy(self.cfg, "READING")
+        sem = asyncio.Semaphore(max(1, self.cfg.reading_parallel))
+        trace = bus.Trace(self.cfg, channel=self.cfg.reading_channel)
+        trace.emit("request", text=f"{pid} {kind} {len(roles)}건")
+        failed: list[str] = []
+
+        def director_search(q: str) -> str:
+            hits = memory.ResearchMemory(self.cfg, self.lab.ledger).search(
+                q, k=6, allow=lambda e: load_policy(self.cfg, e).allows_discord if e else True)
+            return memory.format_hits(hits)
+
+        async def one(role: str) -> None:
+            async with sem:
+                trace.emit("claim", src=role, text=f"{pid} {kind}")
+                if role == "director":
+                    base, model, search = director_system(None, self.cfg), self.cfg.model_director, director_search
+                else:
+                    base, model = system_for(role, self.cfg), model_for(self.cfg, role)
+                    search = lambda q: past_readings(self.cfg, q)  # noqa: E731
+                path, err = None, ""
+                for _ in range(2):
+                    try:
+                        path = await asyncio.to_thread(
+                            reading.write_report, self.cfg, self.lab.client, role, pid, system_base=base, model=model,
+                            data_policy=policy, memory_search=search, name=DISPLAY_EN[role],
+                            label=label(role) if role != "director" else "연구실장", mode=mode)
+                        break
+                    except Exception as e:
+                        err = f"{type(e).__name__}: {str(e)[:150]}"
+                        log.warning("%s %s 실패(%s): %s", pid, kind, role, err)
+                trace.emit("done", src=role, ok=path is not None)
+                if path is None:
+                    failed.append(f"{DISPLAY_EN[role]} ({err})")
+                    return
+                text = f"**{kind} · {DISPLAY_EN[role]}**\n" + reading.report_preview(path.read_text(encoding="utf-8"))
+                member = self.notifier.members.get(role) if role != "director" else None
+                posted = False
+                if member is not None and member.is_ready():
+                    posted = await member.post_report(thread.id, text, path)
+                if not posted:                    # 연구실장 봇이 대신 올린다(그 팀원 봇이 없거나 게시 실패)
+                    parts = chunks(text if role == "director" else f"[{DISPLAY_EN[role]}] " + text)
+                    for i, part in enumerate(parts):
+                        kw = {"files": [discord.File(str(path), filename=path.name)]} if i == len(parts) - 1 else {}
+                        await thread.send(part, **kw)
+
+        async with thread.typing():
+            await asyncio.gather(*(one(r) for r in roles))
+        total = len(sess.get("reviewers") or reading.REPORTERS) if mode == "review" else len(reading.REPORTERS)
+        done = total - len(reading.missing_reports(self.cfg, pid))
+        msg = (f"{kind} {done}/{total}건 완료. 저장: workspace/reading/{pid}/{'reviews' if mode == 'review' else 'reports'}/")
+        if failed:
+            msg += "\n작성하지 못함: " + "; ".join(failed) + f"\n이 스레드에서 `/reading retry` 로 빠진 {kind}만 다시 씁니다."
+        await thread.send(msg)
+
+    async def _reading_followup(self, message: discord.Message, sess: dict):
+        pid, store = sess["id"], reading.ReadingStore(self.cfg)
+        text = (message.content or "").strip()
+        saved = await self._save_reading_inputs(message, pid) if message.attachments else []
+        if reading.CLOSE_WORDS.search(text):
+            store.log(pid, "연구자", text)
+            await self._reading_close(message.channel, pid)
+            return
+        url = reading.find_url(text)
+        if url and not reading.pdf_url(url):           # 스레드 안에서 올린 글 링크(내 분석 등)도 읽어서 담당이 보게 한다
+            got = await asyncio.to_thread(reading.fetch_page, url, store.dir(pid) / "inputs" / "article.md")
+            saved.append("article.md (링크의 글)" if got else "(링크의 글을 받지 못함)")
+            if got:
+                text += f"\n[연구자가 링크한 글을 세션 파일 article.md 로 저장함. read_paper·search_paper 로 읽을 수 있다. 제목: {got[0]}]"
+        store.log(pid, "연구자", text + (f" [첨부: {', '.join(saved)}]" if saved else ""))
+        ready = self._ready_roles()
+        recent = store.history_text(pid, limit=6, each=400)
+        try:
+            out = await asyncio.to_thread(
+                self.director.reply, [{"role": "user", "content": f"[최근 대화]\n{recent}\n\n[지금 연구자의 글]\n{text}"}],
+                requester_id=message.author.id, policy_id="READING", tools=[],
+                extra_system=reading.ROUTE_Q.format(channel=self.cfg.reading_channel, pid=pid,
+                                                    tutors=", ".join(sess.get("tutors", []))))
+        except Exception:
+            log.exception("리딩 질문 분배 오류")
+            out = ""
+        roles = [r for r in reading.parse_answer(out, sess.get("tutors") or ["lm"]) if r in ready]
+        if reading.ALL_WORDS.search(text):       # "전원 의견", "각자 해석" → 접속한 팀원 모두가 각자 답한다
+            roles = [r for r in reading.REPORTERS if r != "director" and r in ready]
+        if not roles:
+            roles = [r for r in sess.get("tutors", []) if r in ready][:1]
+        if not roles:
+            await message.reply("지금 접속해 있는 튜터가 없습니다.", mention_author=False)
+            return
+        trace = bus.Trace(self.cfg, channel=self.cfg.reading_channel)
+        trace.emit("request", text=f"{pid}: {text[:200]}")
+        if len(roles) > 2:                         # 여러 명이면 동시에(한도 보호용 상한) 각자 자기 해석으로 답한다
+            sem = asyncio.Semaphore(max(1, self.cfg.reading_parallel))
+
+            async def each(r):
+                async with sem:
+                    await self.notifier.members[r].tutor(
+                        message.channel.id, pid, f"[연구자의 질문 · 팀원 전원이 각자 답하는 중. 당신 분야의 해석만, 다른 팀원과 겹치지 않게]\n{text}",
+                        trace=trace)
+            await message.reply(f"{len(roles)}명이 각자 답합니다.", mention_author=False)
+            await asyncio.gather(*(each(r) for r in roles))
+            return
+        for n, r in enumerate(roles):
+            await self.notifier.members[r].tutor(message.channel.id, pid, f"[연구자의 질문]\n{text}",
+                                                 trace=trace, reply_to=message if n == 0 else None)
+
+    async def _reading_close(self, channel, pid: str) -> str:
+        store = reading.ReadingStore(self.cfg)
+        sess = store.get(pid) or {}
+        ready = self._ready_roles()
+        writer = "documenter" if "documenter" in ready else next((r for r in sess.get("tutors", []) if r in ready), None)
+        if writer is None:
+            await channel.send("리딩 노트를 쓸 팀원 봇이 접속해 있지 않습니다.")
+            return ""
+        member = self.notifier.members[writer]
+        async with channel.typing():
+            md = await asyncio.to_thread(member.tutor_reply, pid,
+                                         (reading.CLOSE_REVIEW_PROMPT if sess.get("kind") == "review" else reading.CLOSE_PROMPT)
+                                         .format(log=store.history_text(pid, limit=60, each=2500)),
+                                         load_policy(self.cfg, "READING"), None, max_tokens=6000)
+        path = store.close(pid, md)
+        due = growth.due_notice(self.cfg, [c["id"] for c in growth.due(self.cfg) if c["kind"] == "research"])
+        from .agents import DISPLAY_EN
+        head = (f"{pid} 리딩 노트를 남겼습니다({DISPLAY_EN[writer]} 작성, workspace/reading/notes/{path.name}). "
+                "연구실장 기억 검색에서 '논문 리딩 노트'로 찾을 수 있습니다.")
+        parts = chunks(head + "\n\n" + md + ("\n\n" + due if due else ""))
+        for i, part in enumerate(parts):
+            kw = {"files": [discord.File(str(path), filename=path.name)]} if i == len(parts) - 1 else {}
+            await channel.send(part, **kw)
+        return head
 
     def _is_adhoc(self, ch) -> bool:
         if isinstance(ch, discord.Thread):
@@ -714,7 +1101,7 @@ class LabBot(discord.Client):
         async def resume(i: discord.Interaction, exp_id: str):
             await i.response.send_message(await asyncio.to_thread(lab.resume, exp_id))
 
-        @tree.command(name="approve", description="승인 대기 중인 실험 승인")
+        @tree.command(name="approve", description="승인 대기 중인 실험 승인(대기 중인 명령 승인 요청이 있으면 그것을 승인)")
         async def approve(i: discord.Interaction, exp_id: str):
             if not load_policy(self.cfg, exp_id.upper()).allows_discord:
                 await i.response.send_message("비공개 실험은 로컬 콘솔에서 계획을 검토하고 승인하세요.", ephemeral=True)
@@ -783,6 +1170,39 @@ class LabBot(discord.Client):
             for p in chunks(text)[1:]:
                 await i.followup.send(p)
 
+        @tree.command(name="reading", description="논문 리딩: 세션 목록 / 연구 지향 보기 / 이 스레드 세션 정리")
+        @app_commands.describe(action="list 세션 목록 / lens 연구 지향·최근 리딩 / close 이 스레드 리딩 노트 / retry 빠진 리딩 리포트 다시 쓰기")
+        @app_commands.choices(action=[app_commands.Choice(name=n, value=n) for n in ("list", "lens", "close", "retry")])
+        async def reading_(i: discord.Interaction, action: app_commands.Choice[str]):
+            if i.user.id != self.cfg.discord_owner_id:
+                await i.response.send_message("연구자만 쓸 수 있습니다.", ephemeral=True)
+                return
+            a = action.value
+            if a in ("close", "retry"):
+                sess = reading.ReadingStore(self.cfg).find_by_thread(getattr(i.channel, "id", None))
+                if not sess:
+                    await i.response.send_message("논문 리딩 스레드 안에서 써 주세요.", ephemeral=True)
+                    return
+                if a == "close":
+                    await i.response.send_message(f"{sess['id']} 리딩 노트를 작성합니다.")
+                    await self._reading_close(i.channel, sess["id"])
+                    return
+                todo = reading.missing_reports(self.cfg, sess["id"])
+                if not reading.ReadingStore(self.cfg).paper_text(sess["id"]) and not reading.article_text(self.cfg, sess["id"]):
+                    await i.response.send_message("아직 읽을 수 있는 논문 본문이 없습니다. PDF나 본문을 먼저 올려 주세요.")
+                    return
+                if not todo:
+                    await i.response.send_message("빠진 리포트·첨언이 없습니다.")
+                    return
+                await i.response.send_message(f"빠진 {len(todo)}건을 다시 씁니다.")
+                await self._reading_reports(i.channel, sess["id"], todo)
+                return
+            text = reading.list_summary(self.cfg) if a == "list" else reading.lens_summary(self.cfg)
+            parts = chunks(text)
+            await i.response.send_message(parts[0])
+            for part in parts[1:]:
+                await i.followup.send(part)
+
         @tree.command(name="help", description="사용법")
         async def help_(i: discord.Interaction):
             await i.response.send_message(
@@ -798,4 +1218,7 @@ class LabBot(discord.Client):
                 f"- 처리하며 배운 성향·요령은 누적되어 메인 실험에도 반영됩니다. `/learn list` 로 보고 `approve`/`reject`/`forget`.\n"
                 f"- 연구실장은 과거 실험·결정을 출처와 검증 상태를 붙여 찾아 줍니다. 대화에서 내린 연구 결정은 제안으로 남고 "
                 f"`/memory approve D-###` 로 확정합니다(`/memory list`).\n"
-                f"- `/status [EXP-###]` `/stop` `/resume` `/priority` `/report` `/learn` `/memory`")
+                f"- `#{self.cfg.reading_channel}` 에 공부할 논문 폴더(파일 여러 개, .zip, 맥 폴더 경로) 또는 arXiv·ACL·OpenReview 링크를 올리면 논문 제목으로 스레드가 열리고 10명 전원이 각자 리딩 리포트를 씁니다. 이어서 튜터들과 과외하듯 질문할 수 있습니다. "
+                f"스레드에서 멘션 없이 물으면 맞는 튜터가 답하고, \"정리해줘\"로 리딩 노트를 남깁니다. 대화에서 밝힌 연구 관심·입장은 "
+                f"연구 지향으로 누적되어 모든 에이전트에 반영됩니다(`/reading lens`).\n"
+                f"- `/status [EXP-###]` `/stop` `/resume` `/priority` `/report` `/learn` `/memory` `/reading`")

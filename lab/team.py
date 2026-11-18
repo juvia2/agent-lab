@@ -18,7 +18,7 @@ import re
 
 import discord
 
-from . import adhoc, bus, memory
+from . import adhoc, bus, memory, reading
 from .agents import DISPLAY_EN, label, model_for, system_for
 from .director import DIRECTOR_TOOLS, Director, _merge
 from .llm import NoBackend, ToolOutput, run_agent
@@ -149,6 +149,17 @@ def is_adhoc_channel(cfg, channel_name: str | None, parent_name: str | None = No
     return cfg.adhoc_channel in (channel_name, parent_name)
 
 
+def is_reading_thread(cfg, parent_name: str | None) -> bool:
+    return bool(parent_name) and parent_name == cfg.reading_channel
+
+
+def past_readings(cfg, query: str) -> str:
+    """튜터용: 예전 리딩 노트와 연구실 문헌 노트만 검색한다."""
+    mem = memory.ResearchMemory(cfg)
+    hits = [h for h in mem.search(query, k=8) if h["kind"] in (memory.K_READING, memory.K_LITERATURE)][:5]
+    return memory.format_hits(hits)
+
+
 def _adhoc_of(cfg, ch) -> bool:
     if isinstance(ch, discord.Thread):
         return is_adhoc_channel(cfg, None, ch.parent.name if ch.parent else None)
@@ -182,6 +193,7 @@ class MemberBot(discord.Client):
         self.peers: dict = {}                 # 역할 → MemberBot (동료 호출을 그 동료 봇 이름으로 보여 주기 위해)
         self.recall = None                    # 연구실장 봇이 넣어 준다: (채널, 글, 답글 대상) → (최근 대화 글, 이어받을 첨부)
         self.promote = None                   # 연구실장 봇이 넣어 준다: 실험 수준의 의뢰를 실험 스레드로 옮기는 함수
+        self.save_reading_inputs = None       # 연구실장 봇이 넣어 준다: 리딩 스레드 첨부를 세션 폴더에 저장
 
     async def on_ready(self):
         self.registry.add(self.user.id, self.role)
@@ -200,9 +212,22 @@ class MemberBot(discord.Client):
     async def on_message(self, message: discord.Message):
         if not self.should_answer(message):
             return
+        ch0 = message.channel
+        if isinstance(ch0, discord.TextChannel) and is_reading_thread(self.cfg, ch0.name):
+            return                                # #논문리딩 첫 글은 @멘션이 있어도 연구실장이 세션을 연다(멘션 = 첨언 지정)
         if _adhoc_of(self.cfg, message.channel):
             await self._on_adhoc(message)
             return
+        ch = message.channel
+        if isinstance(ch, discord.Thread) and is_reading_thread(self.cfg, ch.parent.name if ch.parent else None):
+            sess = reading.ReadingStore(self.cfg).find_by_thread(ch.id)
+            if sess:
+                text = self.registry.humanize(message.content or "", self.cfg.discord_owner_id).strip()
+                if self.save_reading_inputs:      # 연구자가 멘션과 함께 붙인 그림·추가 PDF 도 세션 자료로 저장
+                    await self.save_reading_inputs(message, sess["id"])
+                reading.ReadingStore(self.cfg).log(sess["id"], "연구자", text)
+                await self.tutor(ch.id, sess["id"], f"[연구자가 당신을 지명해 물음]\n{text}", reply_to=message)
+                return
         exp = self.lab.ledger.find_by_thread(message.channel.id) if isinstance(message.channel, discord.Thread) else None
         if not load_policy(self.cfg, exp["id"] if exp else "INTAKE").allows_discord:
             await message.reply(blocked_text(exp["id"] if exp else "INTAKE"), mention_author=False)
@@ -319,8 +344,8 @@ class MemberBot(discord.Client):
         bot, prefix = (self if speaker == self.role else self.peers.get(speaker)), ""
         if bot is None or not bot.is_ready():     # 그 동료 봇이 없으면 내가 대신 이름을 붙여 올린다
             bot, prefix = self, f"**[{DISPLAY_EN.get(speaker, speaker)}]** "
-        icon = "질문 →" if ev["type"] == "call" else "답 →"
-        text = f"{prefix}{icon} @{DISPLAY_EN.get(ev.get('dst'), '?')} {ev.get('text', '')}"
+        icon = "**질문** →" if ev["type"] == "call" else "**답** →"
+        text = f"{prefix}{icon} @{DISPLAY_EN.get(ev.get('dst'), '?')}\n{ev.get('text', '')}"
         try:
             ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
             await ch.send(self.registry.linkify(text)[:1900], allowed_mentions=discord.AllowedMentions.none())
@@ -357,6 +382,88 @@ class MemberBot(discord.Client):
         trace.emit("done", src=self.role, ok=ok)
         for part in chunks(self.registry.linkify(reply)):
             await ch.send(part)
+
+    # ---- #논문리딩 ----
+    async def tutor(self, channel_id: int, pid: str, prompt: str, *, trace=None, reply_to=None) -> str:
+        """논문 세션에서 튜터로 답하고 그 채널에 내 이름으로 올린다. prompt 에 필요한 맥락이 모두 들어 있어야 한다
+        (팀원 봇은 멘션 안 된 글을 읽지 못하므로 세션 대화 기록은 reading 저장소에서 붙인다)."""
+        from .bot import chunks
+        try:
+            ch = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+        except discord.DiscordException:
+            log.warning("[%s] 리딩 스레드 %s 을(를) 읽을 수 없음", self.role, channel_id)
+            return ""
+        policy = load_policy(self.cfg, "READING")
+        if not policy.allows_discord:
+            await ch.send(blocked_text("READING"))
+            return ""
+        trace = trace or bus.Trace(self.cfg, channel=self.cfg.reading_channel)
+        trace.on_event = self._mirror_cb(channel_id)
+        trace.emit("claim", src=self.role, text=f"{pid} 과외")
+        ok = True
+        lock = self._locks.setdefault(channel_id, asyncio.Lock())
+        async with lock:
+            try:
+                async with ch.typing():
+                    reply = await asyncio.to_thread(self.tutor_reply, pid, prompt, policy, trace)
+            except Exception as e:
+                ok = False
+                log.exception("[%s] 과외 처리 오류", self.role)
+                reply = f"처리 중 오류가 났습니다: {type(e).__name__}: {str(e)[:300]}"
+        trace.emit("done", src=self.role, ok=ok)
+        if ok:
+            reading.ReadingStore(self.cfg).log(pid, DISPLAY_EN[self.role], reply)
+        for i, part in enumerate(chunks(self.registry.linkify(reply))):
+            if i == 0 and reply_to is not None:
+                await reply_to.reply(part, mention_author=False)
+            else:
+                await ch.send(part)
+        return reply if ok else ""
+
+    async def post_report(self, channel_id: int, text: str, path=None) -> bool:
+        """리딩 리포트를 내 봇 이름으로 올린다. 실패하면 False(연구실장 봇이 대신 올린다)."""
+        from .bot import chunks
+        try:
+            ch = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+            parts = chunks(self.registry.linkify(text))
+            for i, part in enumerate(parts):
+                kw = {"files": [discord.File(str(path), filename=path.name)]} if path and i == len(parts) - 1 else {}
+                await ch.send(part, allowed_mentions=discord.AllowedMentions.none(), **kw)
+            return True
+        except discord.DiscordException:
+            log.warning("[%s] 리딩 리포트 게시 실패", self.role)
+            return False
+
+    def tutor_reply(self, pid: str, prompt: str, data_policy=None, trace=None, *, max_tokens: int = 3500) -> str:
+        trace = trace or bus.Trace(self.cfg)
+        chain = (self.role,)
+        box = reading.ReadingBox(self.cfg, pid, self.role, memory_search=lambda q: past_readings(self.cfg, q))
+        roster = ", ".join(f"@{DISPLAY_EN[r]}" for r in DISPLAY_EN if r != self.role)
+        system = (system_for(self.role, self.cfg, include_open=True)
+                  + reading.tutor_system_extra(self.cfg, pid, self.role, DISPLAY_EN[self.role], label(self.role),
+                                               self.cfg.reading_channel)
+                  + f"\n동료: {roster}" + bus.ASK_RULES)
+        past = reading.ReadingStore(self.cfg).history_text(pid)
+        msgs = ([{"role": "user", "content": "[이 세션의 지금까지 대화(연구자와 튜터들)]\n" + past},
+                 {"role": "assistant", "content": "확인했습니다."}] if past else []) + [{"role": "user", "content": prompt}]
+
+        def execute(name: str, a: dict) -> ToolOutput:
+            if name == "ask_agent":
+                return bus.ask(trace, chain, a.get("role", ""), a.get("question", ""),
+                               lambda r, q, c: answer_colleague(self.cfg, self.lab, self._read_tool, trace, r, q, c,
+                                                                data_policy))
+            trace.emit("tool", src=self.role, text=bus.tool_summary(name, a))
+            return box.execute(name, a)
+
+        try:
+            res = run_agent(self.lab.client, model=model_for(self.cfg, self.role), system=system, messages=msgs,
+                            tools=reading.READING_SCHEMAS + [bus.ASK_SCHEMA], execute=execute,
+                            max_turns=14, max_tokens=max_tokens, data_policy=data_policy)
+        except NoBackend as e:
+            return f"지금 답변에 쓸 수 있는 모델이 없습니다(한도·로그인·로컬 서버 확인 필요).\n{str(e)[:400]}"
+        text = res.text.strip() or "(응답이 비어 있습니다. 다시 말씀해 주세요.)"
+        foot = box.footer()
+        return text + ("\n\n" + foot if foot else "")
 
     async def _save_inputs(self, message: discord.Message, box, extra: list | None = None) -> str:
         """extra: 앞선 글에서 이어받은 첨부. PDF 는 팀원이 바로 읽을 수 있게 텍스트를 옆에 뽑아 둔다(pypdf 가 있을 때)."""

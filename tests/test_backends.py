@@ -344,7 +344,7 @@ def test_role_without_route_uses_default():
 
 # ------------------------------------------------------------ 파이프라인 통합
 def make_routed_lab(tmp_path, scripted, routes, backends):
-    cfg = dataclasses.replace(Config.from_env(), lab_home=tmp_path / "lab", sandbox_backend="host",
+    cfg = dataclasses.replace(Config.from_env(), lab_home=tmp_path / "lab", sandbox_backend="host", light_approval="auto",
                               anthropic_api_key=None, routes=routes)
     cfg.ensure_dirs()
     router = Router(cfg, backends)

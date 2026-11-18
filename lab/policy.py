@@ -27,7 +27,7 @@ class DataPolicy:
 def load_policy(cfg, exp_id: str | None = None) -> DataPolicy:
     """운영자 소유 정책만 읽는다. 에이전트가 쓰는 실험 폴더 밖에 둔다."""
     # shortcut: 실험 전체에 가장 제한적인 등급을 적용한다; 파일별 공개가 필요하면 입력별 정책으로 확장한다.
-    if not exp_id or not re.fullmatch(r"EXP-\d+|INTAKE|ADHOC", exp_id):
+    if not exp_id or not re.fullmatch(r"EXP-\d+|INTAKE|ADHOC|READING", exp_id):
         return DataPolicy()
     path = Path(cfg.lab_home) / "policies" / f"{exp_id}.json"
     try:

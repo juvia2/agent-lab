@@ -324,7 +324,7 @@ def main() -> int:
                 msgs = [{"role": "user", "content": text}]
                 if saved:
                     msgs.append({"role": "user", "content": "[연구자가 파일을 첨부함. 작업 폴더 기준 경로]\n" + "\n".join(saved)})
-                roster = ", ".join(f"@{DISPLAY_EN[r]}({label(r) if r != 'director' else '🧑‍💼 연구실장'})"
+                roster = ", ".join(f"@{DISPLAY_EN[r]}({label(r) if r != 'director' else '연구실장'})"
                                    for r in DISPLAY_EN if r != role)
                 system = (system_for(role, cfg, include_open=True)
                           + f"\n\n당신은 디스코드에서 {DISPLAY_EN[role]}({label(role)})로 불린다. 한국어로 간결하게 답한다."

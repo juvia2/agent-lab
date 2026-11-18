@@ -12,6 +12,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+               "VECLIB_MAXIMUM_THREADS", "TORCH_NUM_THREADS")
+
+
+def thread_env(cfg) -> dict[str, str]:
+    """수치 라이브러리 스레드 기본값. 명령 안에서 export 하면 그 값이 우선한다."""
+    n = str(max(1, int(getattr(cfg, "sandbox_threads", 1) or 1)))
+    return {k: n for k in THREAD_VARS}
+
 
 @dataclass
 class RunResult:
@@ -37,6 +46,7 @@ class Sandbox:
                 "-v", f"{c.hf_cache_dir}:/hf_cache",
                 "-e", "HF_HOME=/hf_cache", "-e", "PYTHONUNBUFFERED=1",
                 "-e", "TOKENIZERS_PARALLELISM=false",
+                *[x for k, v in thread_env(c).items() for x in ("-e", f"{k}={v}")],
                 "-w", "/work", c.docker_image, "bash", "-lc", command]
         return args
 
@@ -52,6 +62,8 @@ class Sandbox:
             argv = ["bash", "-c", command]
             env = dict(os.environ, HF_HOME=str(self.cfg.hf_cache_dir), PYTHONUNBUFFERED="1",
                        TOKENIZERS_PARALLELISM="false", LAB_DATA=str(self.cfg.data_dir))
+            for k, v in thread_env(self.cfg).items():  # 연구자가 셸에 따로 정해 둔 값은 존중
+                env.setdefault(k, v)
             venv_bin = self.cfg.lab_home / "host-venv" / "bin"
             if venv_bin.is_dir():                      # MPS 용 파이썬 환경이 있으면 우선 사용
                 env["PATH"] = f"{venv_bin}{os.pathsep}{env.get('PATH', '')}"

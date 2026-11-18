@@ -266,3 +266,22 @@ def test_console_state_has_commands_and_page_panels(make_lab):
     assert st["commands"][0]["cmd"].startswith("/status") and st["events"][-1]["type"] == "command"
     for needle in ('id="now"', 'id="cmdlist"', 'id="issued"', "보기 전용"):
         assert needle in console.PAGE
+
+
+def test_practitioner_asks_colleague_during_experiment(make_lab):
+    lab, notifier = make_lab({
+        "practitioner": [[T("ask_agent", role="statistician", question="시드 3개로 충분한가?")], [("text", "통계 담당 의견대로 시드 5개로 늘립니다.")]],
+        "statistician": [[("text", "분산이 커서 5개 이상을 권합니다.")]],
+        "developer": [[("text", "구현합니다.")]]})
+    exp = lab.submit("시드 수", "시드 수 점검")
+    out = lab._call(exp["id"], "practitioner", "실행 전 점검")
+    assert "시드 5개" in out.text
+    assert lab.client.calls == ["practitioner", "statistician", "practitioner"]
+    assert [(t, s, d) for t, s, d in kinds(lab) if t != "stage"] == [
+        ("claim", "practitioner", None), ("call", "practitioner", "statistician"),
+        ("answer", "statistician", "practitioner"), ("done", "practitioner", None)]
+    posted = [(r, txt) for r, (_, txt, _) in zip(notifier.roles, notifier.sent) if "→" in txt]
+    assert posted[0][0] == "practitioner" and "@Statistician" in posted[0][1]      # 질문은 코디 이름으로
+    assert posted[1][0] == "statistician" and "5개 이상" in posted[1][1]           # 답은 통계 담당 이름으로
+    lab._call(exp["id"], "developer", "구현")                                      # 다른 팀원도 같은 구조(묻지 않으면 수임·완료만)
+    assert [(e["type"], e.get("src")) for e in bus.tail(lab.cfg)][-2:] == [("claim", "developer"), ("done", "developer")]

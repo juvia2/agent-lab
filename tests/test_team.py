@@ -89,3 +89,4 @@ def test_discord_text_has_no_emoji():
     assert label("linguist") == "언어학 전문가"
     assert chunks("🧭 설계 자문 시작: 🗣️ 언어학 전문가 ✅ 완료 → 다음") == ["설계 자문 시작: 언어학 전문가 완료 → 다음"]
     assert strip_emoji("👩‍💻 개발 ↩️ 수정") == "개발 수정"
+    assert strip_emoji("⚠️ 승인 필요 📌 결정 🎉 끝") == "⚠️ 승인 필요 📌 결정 끝"          # 주의·핵심 표시만 남는다

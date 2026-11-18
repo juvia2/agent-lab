@@ -21,8 +21,9 @@ from pathlib import Path
 from .config import ROOT
 
 K_DECISION, K_OBSERVED, K_LITERATURE, K_AI = "연구자 결정", "실험 관측", "외부 문헌", "AI 제안"
-KINDS = (K_DECISION, K_OBSERVED, K_LITERATURE, K_AI)
-ROOTS = ("experiments", "notebook", "memory", "literature")
+K_READING = "논문 리딩 노트"
+KINDS = (K_DECISION, K_OBSERVED, K_LITERATURE, K_AI, K_READING)
+ROOTS = ("experiments", "notebook", "memory", "literature", "reading")
 _EXP_FILES = (("request.md", K_DECISION), ("plan.md", None), ("protocol.json", None),
               ("results/run_manifest.json", K_OBSERVED), ("report/report.md", K_OBSERVED))
 _EXP_GLOBS = (("notes/consult_*.md", K_AI), ("report/interpretation_*.md", K_AI), ("review/review_*.json", K_OBSERVED))
@@ -200,7 +201,8 @@ class ResearchMemory:
 
     def _base(self, root: str) -> Path:
         return {"experiments": Path(self.cfg.experiments_dir), "notebook": Path(self.cfg.notebook_dir),
-                "memory": Path(self.cfg.memory_dir), "literature": ROOT / "knowledge" / "literature"}[root]
+                "memory": Path(self.cfg.memory_dir), "literature": ROOT / "knowledge" / "literature",
+                "reading": Path(self.cfg.lab_home) / "reading" / "notes"}[root]
 
     def verification(self, exp_id: str) -> str:
         """검증 통과 여부를 대장과 review 파일에서 읽는다. 확인 못 하면 통과로 치지 않는다."""
@@ -241,6 +243,10 @@ class ResearchMemory:
         lit = ROOT / "knowledge" / "literature"
         for p in sorted(lit.glob("*.md")) if lit.is_dir() else []:
             yield K_LITERATURE, None, f"literature/{p.name}", "초록·공개 본문 기준 요약 · 인용 전 원문 확인", p
+        notes = Path(self.cfg.lab_home) / "reading" / "notes"
+        for p in sorted(notes.glob("P-*.md")) if notes.is_dir() else []:
+            yield (K_READING, None, f"reading/{p.name}",
+                   "#논문리딩 세션 정리 · 연구자 생각 절은 연구자 발화, 나머지는 튜터 해석 · 인용 전 원문 확인", p)
 
     def search(self, query: str, *, k: int = 6, kind: str | None = None, exp_id: str | None = None,
                allow=lambda exp_id: True) -> list[dict]:
