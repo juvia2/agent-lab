@@ -26,6 +26,7 @@ DEFAULT_ROUTES = {
     "documenter": "local, claude/sonnet, gemini",
     "tester": "claude/opus, codex, gemini",
     "default": "claude/sonnet, gemini, codex, local",
+    "fallback": "claude/sonnet, codex",    # 역할 경로가 모두 막혔을 때 예비 경로(인프라 장애 복구). Hermes 는 넣을 수 없다
 }
 
 
@@ -97,6 +98,11 @@ class Config:
     light_approval: str = "button"        # 재집계·점검 명령 경량 승인: button(연구자 버튼) | auto(기록만 남기고 자동 승인)
     light_approval_timeout_min: int = 60  # 경량 승인 대기 상한(분). 넘으면 실행하지 않고 남은 일로 넘긴다
     sandbox_threads: int = 1              # 샌드박스 OMP/MKL/OPENBLAS 스레드 기본값(재현성·CPU 과점 방지)
+    token_budget_max: int = 9_000_000     # 예산 자동 증액 한도. 넘으면 연구자 결정으로 올린다
+    infra_retries: int = 1                # 모델 백엔드가 모두 막혔을 때 같은 호출 재시도 횟수(예비 경로는 Router 가 시도)
+    infra_retry_wait_s: int = 60
+    watchdog_min: int = 30                # 승인 대기가 아닌 정지가 이 시간을 넘으면 연구실장 감시자가 조치
+    digest_hour: int = 21                 # 하루 요약을 보내는 시각(로컬 시)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -149,6 +155,11 @@ class Config:
             light_approval=e("LIGHT_APPROVAL", "button"),
             light_approval_timeout_min=_int("LIGHT_APPROVAL_TIMEOUT_MIN", 60) or 60,
             sandbox_threads=_int("SANDBOX_THREADS", 1) or 1,
+            token_budget_max=_int("TOKEN_BUDGET_MAX", 9_000_000) or 9_000_000,
+            infra_retries=_int("INFRA_RETRIES", 1),
+            infra_retry_wait_s=_int("INFRA_RETRY_WAIT_S", 60),
+            watchdog_min=_int("WATCHDOG_MIN", 30) or 30,
+            digest_hour=_int("DIGEST_HOUR", 21),
         )
 
     # --- 경로 ---

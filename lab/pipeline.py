@@ -17,7 +17,7 @@ from . import approvals
 from .agents import DISPLAY_EN, ROLE_META, label, model_for, system_for
 from .config import ROOT, Config
 from .ledger import PHASE_STATUS, Ledger
-from .llm import BudgetExceeded, NoBackend, Stopped, run_agent
+from .llm import BudgetExceeded, NoBackend, Refused, Stopped, run_agent
 from .notebook import Notebook
 from .notify import Notifier
 from .policy import load_policy
@@ -32,7 +32,9 @@ STATUS_LABEL = {"queued": "대기", "planning": "설계 중", "awaiting_approval
                 "running": "실행 중", "analyzing": "분석 중", "done": "완료",
                 "failed": "실패", "stopped": "중단", "paused": "일시정지"}
 PHASE_LABEL = {"consult": "전문가 자문", "plan": "계획 통합", "build": "코드 구현", "execute": "실험 실행",
-               "analyze": "전체 분석", "interpret": "전문가 해석", "report": "보고서·검증"}
+               "analyze": "전체 분석", "interpret": "전문가 해석", "report": "보고서·검증", "amend": "추가 과업"}
+# 정지 사유 4종(그 밖의 코드 오류는 error). 승인 대기·예산 한도 소진은 사람이 정하고, 인프라 장애·모델 거절·오류는 감시자가 먼저 복구한다
+STOP_LABEL = {"approval": "승인 대기", "budget": "예산 소진", "infra": "인프라 장애", "refusal": "모델 거절", "error": "오류"}
 MAX_REVIEW_ROUNDS = 3        # 초안 1회 + 수정 2회
 
 GITIGNORE = "hf_cache/\ndata/\nledger.db*\n*.pt\n*.bin\n*.safetensors\n*.ckpt\n*.npy\n__pycache__/\n"
@@ -166,7 +168,7 @@ class Lab:
             shutil.copy(src, d / "code" / "lab_utils.py")
         exp = self.ledger.get(eid)
         ahead = len([e for e in self.ledger.list("queued") if e["id"] != eid])
-        self.notifier.post(exp, f"**{eid}** 접수 — {title}\n"
+        self.notifier.digest(exp, f"**{eid}** 접수 — {title}\n"
                                 f"자문: {', '.join(label(r) for r in consult)}\n"
                                 f"대기열 앞에 {ahead}건. 진행 상황은 이 스레드에 올라옵니다.")
         return exp
@@ -180,7 +182,7 @@ class Lab:
         self.ledger.update(exp["id"], status="stopped")
         self.sandbox.kill(exp["id"])
         self.ledger.add_event(exp["id"], "stopped", "연구자 요청으로 중단")
-        self.notifier.post(self.ledger.get(exp["id"]), f"{exp['id']} 중단했습니다. 이어서 하려면 `/resume {exp['id']}`")
+        self.notifier.digest(self.ledger.get(exp["id"]), f"{exp['id']} 중단했습니다. 이어서 하려면 `/resume {exp['id']}`")
         return f"{exp['id']} 중단함."
 
     def resume(self, exp_id: str) -> str:
@@ -190,7 +192,7 @@ class Lab:
         if exp["status"] not in ("failed", "paused", "stopped"):
             return f"{exp['id']}는 {STATUS_LABEL[exp['status']]} 상태라 재개할 수 없습니다."
         fields: dict = {"error": None}
-        if exp["status"] == "paused" and exp.get("error") == "토큰 예산 초과":
+        if exp["status"] == "paused" and (exp.get("error") == "토큰 예산 초과" or self._meta(exp["id"]).get("stop_kind") == "budget"):
             fields["token_budget"] = exp["token_budget"] + self.cfg.token_budget
         if hasattr(self.client, "reset_cooldowns"):      # 한도·로그인을 고친 뒤 이어가는 경우가 많다
             self.client.reset_cooldowns()
@@ -242,7 +244,7 @@ class Lab:
         self.ledger.update(exp["id"], meta_json=json.dumps(meta, ensure_ascii=False))
         self.ledger.update(exp["id"], approved=1, status="queued")
         self.ledger.add_event(exp["id"], "approved", "연구자 승인: " + (exp["approval_reasons"] or ""))
-        self.notifier.post(self.ledger.get(exp["id"]), f"{exp['id']} 승인되었습니다. 작업을 이어갑니다.")
+        self.notifier.digest(self.ledger.get(exp["id"]), f"{exp['id']} 승인되었습니다. 작업을 이어갑니다.")
         return f"{exp['id']} 승인함."
 
     def reject(self, exp_id: str) -> str:
@@ -253,8 +255,33 @@ class Lab:
             return f"{exp_id}: 승인 대기 상태가 아닙니다."
         self.ledger.update(exp["id"], status="stopped")
         self.ledger.add_event(exp["id"], "rejected", "연구자가 승인 거부")
-        self.notifier.post(self.ledger.get(exp["id"]), f"{exp['id']} 승인이 거부되어 중단했습니다.")
+        self.notifier.digest(self.ledger.get(exp["id"]), f"{exp['id']} 승인이 거부되어 중단했습니다.")
         return f"{exp['id']} 거부함."
+
+    def amend(self, exp_id: str, task: str, by: str = "연구자") -> str:
+        """/amend 추가 과업: 쓰기·실행이 필요한 후속 일을 개발→통계→QA→저장 경로로 넣는다(대화 모드 에이전트도 여기로)."""
+        exp = self.ledger.get(exp_id)
+        if not exp:
+            return f"{exp_id}: 없는 실험입니다."
+        task = (task or "").strip()
+        if not task:
+            return "추가 과업 내용이 비어 있습니다."
+        amends = self._meta(exp["id"]).get("amends") or []
+        aid = f"A-{len(amends) + 1:02d}"
+        amends.append({"id": aid, "task": task[:4000], "by": by, "status": "pending", "at": time.strftime("%Y-%m-%d %H:%M")})
+        self._set_meta(exp["id"], amends=amends)
+        self.ledger.add_event(exp["id"], "amend", f"{aid} 추가 과업 접수({by}): {_short(task, 300)}")
+        where = f"results/derived/amend/{aid}/"
+        if exp["status"] in ("done", "failed", "paused", "stopped"):
+            self._start_amend(exp["id"])
+            return f"{exp['id']} 추가 과업 {aid} 접수: 개발→통계→QA를 거쳐 {where} 에 저장합니다."
+        return f"{exp['id']} 추가 과업 {aid} 접수: 지금 진행 중인 작업이 끝나면 이어서 하고 {where} 에 저장합니다."
+
+    def _start_amend(self, eid: str) -> None:
+        exp = self.ledger.get(eid)
+        if exp["phase"] != "amend":
+            self._set_meta(eid, amend_return={"phase": exp["phase"], "status": exp["status"], "error": exp["error"]})
+        self.ledger.update(eid, phase="amend", status="queued")
 
     def set_priority(self, exp_id: str, priority: int) -> str:
         exp = self.ledger.get(exp_id)
@@ -343,34 +370,32 @@ class Lab:
         eid = exp["id"]
         handlers = {"consult": self._phase_consult, "plan": self._phase_plan, "build": self._phase_build,
                     "execute": self._phase_execute, "analyze": self._phase_analyze,
-                    "interpret": self._phase_interpret, "report": self._phase_report}
+                    "interpret": self._phase_interpret, "report": self._phase_report, "amend": self._phase_amend}
         cur = exp
         try:
             while True:
                 cur = self.ledger.get(eid)
                 if cur["status"] == "stopped":
                     return
+                bad = self._contract(cur)
+                if bad:
+                    if not self._bounce(cur, *bad):
+                        return
+                    continue
                 if not handlers[cur["phase"]](cur):
                     return
         except Stopped:
             self.ledger.add_event(eid, "stopped", "작업 중단 확인")
         except BudgetExceeded:
-            self.ledger.update(eid, status="paused", error="토큰 예산 초과")
-            self.ledger.add_event(eid, "paused", "토큰 예산 초과로 일시정지")
-            self.notifier.post(self.ledger.get(eid), f"{eid}: 토큰 예산을 다 썼습니다. 예산을 더 주고 이어가려면 `/resume {eid}`")
+            self._halt(eid, "budget", f"토큰 예산을 자동 증액 한도({self.cfg.token_budget_max:,})까지 다 썼습니다. "
+                                      f"더 주고 이어가려면 `/resume {eid}`", status="paused")
         except NoBackend as e:
-            self.ledger.update(eid, status="paused", error=_short(str(e), 900))
-            self.ledger.add_event(eid, "paused", f"모델 백엔드 없음: {e}")
-            self.notifier.post(self.ledger.get(eid),
-                               f"{eid}: 지금 쓸 수 있는 모델이 없어 일시정지했습니다.\n{_short(str(e), 700)}\n"
-                               f"한도가 풀리거나 로그인/서버를 고친 뒤 `/resume {eid}` 로 이어가세요.")
+            self._halt(eid, "infra", f"재시도와 예비 경로까지 모두 막혀 일시정지: {_short(str(e), 700)}", status="paused")
+        except Refused as e:
+            self._halt(eid, "refusal", f"{PHASE_LABEL.get(cur['phase'], cur['phase'])} 단계: {_short(str(e), 600)}")
         except Exception as e:
             log.error("experiment %s failed:\n%s", eid, traceback.format_exc())
-            self.ledger.update(eid, status="failed", error=f"{type(e).__name__}: {e}"[:1000])
-            self.ledger.add_event(eid, "failed", f"{type(e).__name__}: {e}")
-            self.notifier.post(self.ledger.get(eid),
-                               f"{eid} 실패 ({PHASE_LABEL.get(cur['phase'], cur['phase'])} 단계)\n"
-                               f"원인: {_short(str(e), 600)}\n이어서 하려면 `/resume {eid}`")
+            self._halt(eid, "error", f"{PHASE_LABEL.get(cur['phase'], cur['phase'])} 단계: {type(e).__name__}: {_short(str(e), 600)}")
 
     # ================= 공통 도우미 =================
     def _say(self, eid: str, text: str, files: list[Path] | None = None, role: str | None = None) -> None:
@@ -384,18 +409,61 @@ class Lab:
         except Exception:
             log.exception("bus emit failed")
         try:
-            self.notifier.post(self.ledger.get(eid), text, files, role=role)
+            self.notifier.digest(self.ledger.get(eid), text, files, role=role)   # 진행 알림은 하루 요약으로
         except Exception:
             log.exception("notify failed")
 
     def _advance(self, eid: str, phase: str) -> None:
+        note = self._meta(eid).get("bounce_note")
+        if note and note.get("phase") != phase:
+            self._set_meta(eid, bounce_note=None)
         self.ledger.update(eid, phase=phase, status=PHASE_STATUS[phase])
 
     def _fail(self, eid: str, text: str) -> bool:
-        self.ledger.update(eid, status="failed", error=_short(text, 1000))
-        self.ledger.add_event(eid, "failed", text)
-        self.notifier.post(self.ledger.get(eid), f"{eid} 실패\n{_short(text, 1200)}\n이어서 하려면 `/resume {eid}`")
+        return self._halt(eid, "error", text)
+
+    def _halt(self, eid: str, kind: str, text: str, status: str = "failed") -> bool:
+        """정지. 사람이 정해야 하는 것(예산 한도 소진, 감시자가 이미 한 번 조치한 단계)만 '결정 필요'로 바로 알린다.
+        나머지는 하루 요약에 남기고 감시자(watch.py)가 watchdog_min 뒤 재개를 시도한다."""
+        phase = self.ledger.get(eid)["phase"]
+        tried = (self._meta(eid).get("watchdog") or {}).get(phase, 0)
+        self._set_meta(eid, stop_kind=kind)
+        self.ledger.update(eid, status=status, error=_short(text, 1000))
+        self.ledger.add_event(eid, status, f"[{STOP_LABEL[kind]}] {text}")
+        exp = self.ledger.get(eid)
+        if kind == "budget" or tried >= 1:
+            self.notifier.post(exp, f"**결정 필요** {eid} ({STOP_LABEL[kind]}, {PHASE_LABEL.get(phase, phase)} 단계)\n"
+                                    f"{_short(text, 1200)}\n이어서 하려면 `/resume {eid}`, 그만두려면 `/stop {eid}`")
+        else:
+            self.notifier.digest(exp, f"{eid} 정지({STOP_LABEL[kind]}): {_short(text, 600)}\n"
+                                      f"{self.cfg.watchdog_min}분 뒤 연구실장이 재개를 시도합니다.")
         return False
+
+    # ---- 단계 산출물 계약: 받는 단계가 시작 전에 앞 단계 산출물을 확인하고, 어기면 만든 단계로 한 번 되돌린다 ----
+    def _contract(self, exp: dict) -> tuple[str, str] | None:
+        d = self.cfg.experiments_dir / exp["id"]
+        roles = self._meta(exp["id"]).get("consult") or list(CONSULTANTS)
+        phase = exp["phase"]
+        need = {"plan": ("consult", [f"notes/consult_{r}.md" for r in roles]),
+                "interpret": ("analyze", ["results/derived/analysis_summary.json"]),
+                "report": ("interpret", [f"report/interpretation_{r}.md" for r in roles])}.get(phase)
+        if not need:
+            return None
+        miss = [f for f in need[1] if not (d / f).is_file()]
+        return (need[0], "필수 산출물 없음: " + ", ".join(miss)) if miss else None
+
+    def _bounce(self, exp: dict, producer: str, problem: str) -> bool:
+        eid, phase = exp["id"], exp["phase"]
+        meta = self._meta(eid)
+        n = meta.get("bounces") or {}
+        key = f"{producer}->{phase}"
+        if n.get(key, 0) >= 1:
+            return self._halt(eid, "error", f"{PHASE_LABEL[phase]} 단계 계약 위반이 되돌린 뒤에도 남음: {problem}")
+        n[key] = n.get(key, 0) + 1
+        self._set_meta(eid, bounces=n, bounce_note={"phase": producer, "from": phase, "text": problem})
+        self._say(eid, f"{PHASE_LABEL[phase]} 단계가 받은 산출물에 문제: {problem} → {PHASE_LABEL[producer]} 단계로 되돌립니다(1회).")
+        self._advance(eid, producer)
+        return True
 
     def _meta(self, eid: str) -> dict:
         return json.loads(self.ledger.get(eid).get("meta_json") or "{}")
@@ -426,8 +494,14 @@ class Lab:
     def _usage_cb(self, eid: str):
         def cb(n: int) -> None:
             used = self.ledger.add_tokens(eid, n)
-            if used > self.ledger.get(eid)["token_budget"]:
-                raise BudgetExceeded()
+            budget = self.ledger.get(eid)["token_budget"]
+            if used > budget:
+                cap = self.cfg.token_budget_max
+                if budget >= cap:
+                    raise BudgetExceeded()
+                new = min(cap, budget + self.cfg.token_budget)    # 정해 둔 한도까지는 사람에게 묻지 않고 늘린다
+                self.ledger.update(eid, token_budget=new)
+                self._say(eid, f"토큰 예산 자동 증액: {budget:,} → {new:,} (한도 {cap:,})")
         return cb
 
     def _stop_fn(self, eid: str):
@@ -440,7 +514,7 @@ class Lab:
                      enforce_protocol=role == "practitioner" and self.ledger.get(eid)["phase"] not in ("consult", "plan"),
                      approved_protocol_sha256=self._meta(eid).get("approved_protocol_sha256"),
                      # 본 실행 이후(전체 분석·보고서 수정)의 개발자 명령은 승인 목록으로 강제한다(approvals.py)
-                     enforce_commands=role == "developer" and self.ledger.get(eid)["phase"] in ("analyze", "report"),
+                     enforce_commands=role == "developer" and self.ledger.get(eid)["phase"] in ("analyze", "report", "amend"),
                      should_stop=self._stop_fn(eid))
         policy = load_policy(self.cfg, eid)
         system, tools, execute, trace = system_for(role, self.cfg), tool_schemas(role, only), tb.execute, None
@@ -459,10 +533,19 @@ class Lab:
             system, tools = system + bus.ASK_RULES, tools + [bus.ASK_SCHEMA]
             trace.emit("claim", src=role, text=f"{eid} 작업")   # 열려 있는 동안 묻는 쪽·답하는 쪽 모두 '활동 중'
         try:
-            return run_agent(self.client, model=model_for(self.cfg, role), system=system, prompt=prompt,
-                             tools=tools, execute=execute, on_usage=self._usage_cb(eid),
-                             should_stop=self._stop_fn(eid), max_turns=self.cfg.max_agent_turns, max_tokens=max_tokens,
-                             data_policy=policy)
+            for attempt in range(self.cfg.infra_retries + 1):
+                try:
+                    return run_agent(self.client, model=model_for(self.cfg, role), system=system, prompt=prompt,
+                                     tools=tools, execute=execute, on_usage=self._usage_cb(eid),
+                                     should_stop=self._stop_fn(eid), max_turns=self.cfg.max_agent_turns,
+                                     max_tokens=max_tokens, data_policy=policy)
+                except NoBackend as e:            # 인프라 장애: 기다렸다 재시도(예비 경로는 Router 가 이미 시도함)
+                    if attempt >= self.cfg.infra_retries:
+                        raise
+                    self.ledger.add_event(eid, "infra_retry", f"[{role}] {_short(str(e), 300)} → {self.cfg.infra_retry_wait_s}초 뒤 재시도")
+                    time.sleep(self.cfg.infra_retry_wait_s)
+                    if hasattr(self.client, "reset_cooldowns"):
+                        self.client.reset_cooldowns()
         finally:
             if trace:
                 trace.emit("done", src=role)
@@ -472,13 +555,16 @@ class Lab:
         def cb(ev: dict) -> None:
             if ev.get("type") in ("call", "answer"):
                 head = "**질문** →" if ev["type"] == "call" else "**답** →"
-                self.notifier.post(self.ledger.get(eid), f"{head} @{DISPLAY_EN.get(ev.get('dst'), '?')}\n{ev.get('text', '')}"[:1900],
-                                   role=ev.get("src"))
+                self.notifier.digest(self.ledger.get(eid), f"{head} @{DISPLAY_EN.get(ev.get('dst'), '?')}\n{ev.get('text', '')}"[:1900],
+                                     role=ev.get("src"))
         return cb
 
     def _header(self, exp: dict, stage: str) -> str:
         network, host = self._perms(exp)
-        return (f"실험 ID: {exp['id']}\n제목: {exp['title']}\n지금 단계: {stage}\n"
+        note = self._meta(exp["id"]).get("bounce_note")
+        back = (f"## 다음 단계에서 되돌아온 문제(먼저 해결)\n{PHASE_LABEL.get(note['from'], note['from'])} 단계가 받은 산출물: {note['text']}\n\n"
+                if note and note.get("phase") == exp["phase"] else "")
+        return (back + f"실험 ID: {exp['id']}\n제목: {exp['title']}\n지금 단계: {stage}\n"
                 f"작업 디렉터리가 곧 실험 폴더이다(상대경로 사용).\n"
                 f"네트워크: {'허용' if network else '차단'} / 호스트 직접 실행: {'허용(where=host, 이때 /data 대신 $LAB_DATA 사용)' if host else '불가'}\n\n"
                 f"## 요청서(request.md)\n{exp['request_md']}")
@@ -563,7 +649,7 @@ class Lab:
         res = self._call(eid, "practitioner", prompt, only=_only("practitioner", "finish_execution", "request_change"))
         plan = res.terminal
         if not plan:
-            raise RuntimeError("실험 실무 담당이 계획을 제출하지 않고 종료함: " + _short(res.text, 300))
+            raise Refused("실험 실무 담당이 계획을 제출하지 않고 종료함: " + _short(res.text, 300))
         if hints and not plan.get("consult_values"):          # 장치: 자문에 수치가 있는데 표가 비면 한 번 되돌린다
             self._say(eid, f"{label('practitioner')} 계획에 자문 확인값이 비어 있어 다시 요청합니다(자문 수치 후보 {len(hints)}줄).")
             res = self._call(eid, "practitioner", prompt + "\n\n## 다시 제출\n방금 낸 계획의 consult_values 가 비었다. "
@@ -637,7 +723,7 @@ class Lab:
         res = self._call(eid, "developer", self._header(exp, stage) + "\n\n" + task, network=network, host=host)
         b = res.terminal
         if not b:
-            raise RuntimeError("백엔드 개발자가 구현 종료를 보고하지 않음: " + _short(res.text, 300))
+            raise Refused("백엔드 개발자가 구현 종료를 보고하지 않음: " + _short(res.text, 300))
         (d / "notes" / "build.json").write_text(json.dumps(b, ensure_ascii=False, indent=2), encoding="utf-8")
         self._say(eid, f"{label('developer')} 구현 {b['status']}\n{_short(b['summary'], 700)}\n"
                        f"테스트: {_short('; '.join(b.get('tests_run', [])), 400)}"
@@ -755,7 +841,7 @@ class Lab:
         res = self._call(eid, "developer", prompt, network=network, host=host)
         b = res.terminal
         if not b:
-            raise RuntimeError("백엔드 개발자가 분석 종료를 보고하지 않음: " + _short(res.text, 300))
+            raise Refused("백엔드 개발자가 분석 종료를 보고하지 않음: " + _short(res.text, 300))
         (d / "notes" / "analysis_build.json").write_text(json.dumps(b, ensure_ascii=False, indent=2), encoding="utf-8")
         warn = "" if (d / "results" / "derived" / "analysis_summary.json").exists() else \
             "\nresults/derived/analysis_summary.json 이 없습니다."
@@ -840,7 +926,7 @@ class Lab:
                        "보고서를 고쳐 `finish_report`로 다시 제출하세요.")
             res = self._call(eid, "documenter", prompt, network=network, host=host)
             if not res.terminal:
-                raise RuntimeError("서류화 담당이 보고서를 제출하지 않고 종료함: " + _short(res.text, 300))
+                raise Refused("서류화 담당이 보고서를 제출하지 않고 종료함: " + _short(res.text, 300))
             report = res.terminal
             self._say(eid, f"{label('documenter')} 보고서 {'초안' if rnd == 1 else f'{rnd - 1}차 수정본'} 작성 → 검증 요청")
             self._apply_analysis_notes(self.ledger.get(eid))
@@ -953,7 +1039,66 @@ class Lab:
         self.ledger.add_event(eid, "done", f"완료 ({verdict})")
         self._git_commit(f"{eid}: {exp['title']}")
         self.notifier.post_report(self.ledger.get(eid), f"**{eid} 완료** — {exp['title']}\n\n{summary}\n\n{vline}", files)
+        if any(a["status"] == "pending" for a in self._meta(eid).get("amends") or []):
+            self._start_amend(eid)
         return False
+
+    # ================= 추가 과업(/amend): 개발 → 통계 → QA → 저장 =================
+    def _phase_amend(self, exp: dict) -> bool:
+        eid = exp["id"]
+        d = self.cfg.experiments_dir / eid
+        meta = self._meta(eid)
+        amends = meta.get("amends") or []
+        todo = next((a for a in amends if a["status"] == "pending"), None)
+        if not todo:                               # 다 끝났으면 추가 과업 전 상태로 돌려놓는다
+            ret = meta.get("amend_return") or {"phase": "report", "status": "done", "error": None}
+            self._set_meta(eid, amend_return=None)
+            self.ledger.update(eid, phase=ret["phase"], status=ret["status"], error=ret.get("error"))
+            return False
+        aid, out = todo["id"], f"results/derived/amend/{todo['id']}"
+        (d / out).mkdir(parents=True, exist_ok=True)
+        network, host = self._perms(exp)
+        head = self._header(exp, f"amend({aid} 추가 과업)") + f"\n\n## 추가 과업 {aid} ({todo['by']} 요청)\n{todo['task']}\n\n"
+        issues: list[dict] = []
+        b: dict = {}
+        memo: dict = {}
+        review: dict = {}
+        for rnd in (1, 2):                         # 통계·QA 지적이 있으면 개발로 한 번 되돌린다
+            self._say(eid, f"{label('developer')} 추가 과업 {aid} {'시작' if rnd == 1 else '수정'}")
+            res = self._call(eid, "developer", head +
+                             f"결과·스크립트·표는 {out}/ 아래에 저장하고, {out}/summary.md 에 한 일, 실행 명령, 핵심 수치와 출처 파일을 적으세요. "
+                             "기존 results/ 파일은 덮어쓰지 마세요. 새 명령은 실행 전에 `request_command_approval`로 승인받으세요. 끝나면 `finish_build`."
+                             + (f"\n\n## 통계·QA 지적(반영해서 다시)\n{fmt_issues(issues)}" if issues else ""),
+                             network=network, host=host)
+            if not res.terminal:
+                raise Refused(f"백엔드 개발자가 추가 과업 {aid}을 보고하지 않음: " + _short(res.text, 300))
+            b = res.terminal
+            res = self._call(eid, "statistician", head +
+                             f"백엔드 개발자가 {out}/ 에 낸 산출물을 검토하세요. 방법이 과업에 맞는지, 수치를 원자료에서 다시 계산하면 같은지 확인하고 "
+                             "문제와 권고를 `submit_memo`로 제출하세요.", network=network, host=host)
+            memo = res.terminal or {"memo_markdown": res.text or "(검토 메모 없음)", "summary": "(정식 메모 제출 없음)",
+                                    "key_concerns": [], "recommendations": []}
+            self._write_memo(d / out / "stat_review.md", "statistician", memo)
+            res = self._call(eid, "tester", head +
+                             f"{out}/ 의 산출물과 통계 검토({out}/stat_review.md)를 독립적으로 검증하고 `submit_review`로 제출하세요. "
+                             "핵심 수치는 원자료에서 직접 재계산하세요.", network=network, host=host)
+            review = res.terminal or {"verdict": "unverified", "issues": [], "checks_run": [], "summary": "QA 판정 미제출"}
+            (d / out / "review.json").write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
+            issues = review.get("issues", [])
+            if review.get("verdict") == "pass" and not [i for i in issues if i.get("severity") in ("critical", "major")]:
+                break
+        ok = review.get("verdict") == "pass" and not [i for i in issues if i.get("severity") in ("critical", "major")]
+        (d / out / "amend.md").write_text(
+            f"# 추가 과업 {aid}\n\n- 요청({todo['by']}, {todo['at']}): {todo['task']}\n- 판정: {'통과' if ok else '미해결 지적 있음'}\n\n"
+            f"## 개발\n{b.get('summary', '')}\n\n## 통계 검토\n{memo.get('summary', '')}\n\n"
+            f"## QA\n{review.get('summary', '')}\n{fmt_issues(issues)}\n", encoding="utf-8")
+        todo["status"] = "done" if ok else "unresolved"
+        self._set_meta(eid, amends=amends)
+        self.ledger.add_event(eid, "amend_done", f"{aid} {todo['status']}")
+        self._git_commit(f"{eid}: 추가 과업 {aid}")
+        self.notifier.post(self.ledger.get(eid), f"**{eid} 추가 과업 {aid} 완료** ({'QA 통과' if ok else 'QA 미해결 지적 있음'})\n"
+                                                 f"{_short(b.get('summary', ''), 700)}\n저장: {out}/", [d / out / "amend.md"])
+        return True
 
     # ================= git =================
     def _ensure_git(self) -> None:

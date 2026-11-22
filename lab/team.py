@@ -41,6 +41,7 @@ MEMBER_CHANNELS = {
 READ_TOOLS = {"lab_status", "list_experiments", "get_experiment", "list_experiment_files",
               "read_experiment_file", "search_notebook"}
 MEMBER_TOOLS = [t for t in DIRECTOR_TOOLS if t["name"] in READ_TOOLS]
+AMEND_TOOL = next(t for t in DIRECTOR_TOOLS if t["name"] == "amend_experiment")   # 대화 모드에서 쓰기 일을 넘기는 유일한 길
 
 CHAT_RULES = """
 
@@ -51,6 +52,8 @@ CHAT_RULES = """
   실험에 대해 물으면 도구로 실제 파일·상태를 확인하고 답한다. 수치는 파일에서 읽은 것만, 출처 파일과 함께 말한다.
 - 실험 접수·중단·재개·승인은 하지 않는다. 그런 요청이면 연구실장(@Lab Director)에게 말하라고 안내한다.
   승인은 연구자만 버튼이나 /approve 로 할 수 있다.
+- 파일 저장·코드 실행이 필요한 후속 일(재계산해 저장, 표 추가 등)을 받으면 "못 한다"로 끝내지 않는다.
+  `amend_experiment`로 추가 과업을 넣고(개발→통계→QA→저장), 접수된 과업 번호와 저장 위치를 답한다.
 - 디스코드 메시지이므로 보통 3~10문장, 1500자 이내. 필요할 때만 목록·표를 쓴다.
 - 당신 영역 밖의 질문이면 아는 만큼 짧게 답하고 맞는 동료를 "@영문이름"으로 추천한다.
   동료: {roster}
@@ -564,13 +567,18 @@ class MemberBot(discord.Client):
             if name == "ask_agent":
                 return ask(a)
             trace.emit("tool", src=self.role, text=bus.tool_summary(name, a))
+            if name == "amend_experiment":
+                eid = str(a.get("exp_id", "")).upper()
+                if not load_policy(self.cfg, eid).allows_discord:
+                    return ToolOutput("이 실험은 디스코드에서 다룰 수 없습니다.", is_error=True)
+                return ToolOutput(self.lab.amend(eid, a.get("task", ""), by=DISPLAY_EN[self.role]))
             if name not in READ_TOOLS:
                 return ToolOutput(f"{name} 은(는) 쓸 수 없는 도구입니다", is_error=True)
             return self._director._tool(name, a, None, None, self.cfg.discord_owner_id)
 
         try:
             res = run_agent(self.lab.client, model=model_for(self.cfg, self.role), system=self.system_prompt(ctx),
-                            messages=msgs, tools=MEMBER_TOOLS + [bus.ASK_SCHEMA], execute=execute, max_turns=8, max_tokens=2500,
+                            messages=msgs, tools=MEMBER_TOOLS + [AMEND_TOOL, bus.ASK_SCHEMA], execute=execute, max_turns=8, max_tokens=2500,
                             data_policy=data_policy)
         except NoBackend as e:
             return f"지금 답변에 쓸 수 있는 모델이 없습니다(한도·로그인·로컬 서버 확인 필요).\n{str(e)[:400]}"

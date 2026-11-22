@@ -143,7 +143,7 @@ def run_check(cfg: Config, router) -> int:
 def run_console(lab: Lab, director: Director, stop: threading.Event) -> None:
     lab.ledger.reset_interrupted()
     lab.start_workers(stop)
-    print("연구실 콘솔. 명령: status | approve|reject|stop|resume EXP-### | quit  (그 외 입력은 연구실장과 대화)")
+    print("연구실 콘솔. 명령: status | approve|reject|stop|resume EXP-### | amend EXP-### 할일 | quit  (그 외 입력은 연구실장과 대화)")
     history: list[dict] = []
     while True:
         try:
@@ -158,6 +158,10 @@ def run_console(lab: Lab, director: Director, stop: threading.Event) -> None:
             print(lab.status_text())
             continue
         head, _, arg = line.partition(" ")
+        if head == "amend" and arg:
+            eid, _, task = arg.partition(" ")
+            print(lab.amend(eid.upper(), task))
+            continue
         if head in ("approve", "reject", "stop", "resume") and arg:
             print(getattr(lab, head)(arg.strip().upper()))
             continue

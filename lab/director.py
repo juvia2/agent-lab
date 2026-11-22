@@ -61,6 +61,13 @@ DIRECTOR_TOOLS = [
          "consult": {"type": "array", "items": {"type": "string", "enum": list(CONSULTANTS)},
                      "description": "자문·해석에 참여할 전문가. 생략하면 5명 모두"}},
          "required": ["title", "request_markdown"]}},
+    {"name": "amend_experiment",
+     "description": "쓰기·실행이 필요한 후속 일(재계산해 저장, 표 추가, 점검 스크립트 실행 등)을 추가 과업으로 넣는다. "
+                    "개발→통계→QA를 거쳐 results/derived/amend/A-##/ 에 저장되고 끝나면 연구자에게 완료 알림이 간다. "
+                    "읽기 도구만으로 못 하는 일을 거절로 끝내지 말고 이 도구로 넘긴다.",
+     "input_schema": {"type": "object", "properties": {
+         "exp_id": _ID, "task": {"type": "string", "description": "할 일. 무엇을 어떤 기준으로 계산·저장할지, 근거 파일 경로 포함"}},
+         "required": ["exp_id", "task"]}},
     {"name": "stop_experiment", "description": "실험을 중단한다.",
      "input_schema": {"type": "object", "properties": {"exp_id": _ID}, "required": ["exp_id"]}},
     {"name": "resume_experiment", "description": "실패·중단·일시정지된 실험을 재개한다.",
@@ -243,6 +250,8 @@ class Director:
                              thread_id=thread_id, channel_id=channel_id, requester_id=requester_id,
                              consult=a.get("consult"))
             return ToolOutput(f"접수됨: {exp['id']}")
+        if name == "amend_experiment":
+            return ToolOutput(lab.amend(str(a["exp_id"]).upper(), a.get("task", ""), by="연구실장"))
         if name == "stop_experiment":
             return ToolOutput(lab.stop(a["exp_id"]))
         if name == "resume_experiment":

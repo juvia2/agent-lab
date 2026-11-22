@@ -323,11 +323,12 @@ def test_partial_execution_twice_fails_after_one_round(make_lab):
 
 
 def test_budget_pauses_and_resume_adds_budget(make_lab):
-    lab, _ = make_lab(script(), tokens=700, token_budget=1000)
+    lab, notifier = make_lab(script(), tokens=700, token_budget=1000, token_budget_max=1000)   # 자동 증액 한도 = 기본 예산
     exp = submit(lab)
     lab.process_one()
     e = lab.ledger.get(exp["id"])
     assert e["status"] == "paused"
+    assert any(t.startswith(f"**결정 필요** {exp['id']} (예산 소진") for _, t, _ in notifier.sent)
     lab.resume(exp["id"])
     assert lab.ledger.get(exp["id"])["token_budget"] == 1000 + lab.cfg.token_budget
     assert lab.ledger.get(exp["id"])["status"] == "queued"

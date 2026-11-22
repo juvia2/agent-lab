@@ -567,6 +567,8 @@ class Router:
         m = ROLE_RE.search(system)
         role = m.group(1) if m else "director"
         routes = self.cfg.routes.get(role) or self.cfg.routes.get("default") or []
+        primary = {n for n, _ in routes}          # 역할 경로가 모두 막히면 예비 경로로 넘어간다(정지 사유: 인프라 장애)
+        routes = list(routes) + [r for r in self.cfg.routes.get("fallback", []) if r[0] not in primary]
         policy = kw.get("data_policy") or load_policy(self.cfg)
         tried: list[str] = []
         for name, model in routes:

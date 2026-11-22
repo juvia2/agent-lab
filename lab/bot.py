@@ -201,6 +201,12 @@ class DiscordNotifier(Notifier):
             return
         self._run(self._post(exp, text, files, role))
 
+    def digest(self, exp, text, files=None, role=None):
+        if exp and not load_policy(self.cfg, exp["id"]).allows_discord:
+            return
+        from .watch import digest_add
+        digest_add(self.cfg, exp["id"] if exp else None, text, role)
+
     def post_report(self, exp, text, files=None):
         if not load_policy(self.cfg, exp["id"]).allows_discord:
             log.warning("%s 결과 게시 차단: 자료 정책", exp["id"])
@@ -365,6 +371,8 @@ class LabBot(discord.Client):
         await self._ensure_channels()
         recovered = self.lab.ledger.reset_interrupted()
         self.lab.start_workers(self.stop_event)
+        from . import watch
+        watch.run(self.lab, self.stop_event)      # 연구실장 감시자(정지 30분) + 하루 요약
         team = [m.role for m, _ in self.members]
         msg = "**연구실 가동**" + (f" · 팀원 봇 {len(team)}명 접속 시도" if team else "") + (f"\n중단됐던 실험 {len(recovered)}건을 이어서 진행합니다: {', '.join(recovered)}"
                                     if recovered else "")
@@ -1112,6 +1120,11 @@ class LabBot(discord.Client):
         async def reject(i: discord.Interaction, exp_id: str):
             await i.response.send_message(await asyncio.to_thread(lab.reject, exp_id))
 
+        @tree.command(name="amend", description="추가 과업: 쓰기·실행이 필요한 후속 일을 개발→통계→QA→저장으로 맡긴다")
+        @app_commands.describe(exp_id="예: EXP-001", task="할 일(무엇을 계산·저장할지)")
+        async def amend(i: discord.Interaction, exp_id: str, task: str):
+            await i.response.send_message(await asyncio.to_thread(lab.amend, exp_id.upper(), task))
+
         @tree.command(name="priority", description="대기 중인 실험의 우선순위 변경(클수록 먼저)")
         async def priority(i: discord.Interaction, exp_id: str, value: int):
             await i.response.send_message(lab.set_priority(exp_id, value))
@@ -1221,4 +1234,5 @@ class LabBot(discord.Client):
                 f"- `#{self.cfg.reading_channel}` 에 공부할 논문 폴더(파일 여러 개, .zip, 맥 폴더 경로) 또는 arXiv·ACL·OpenReview 링크를 올리면 논문 제목으로 스레드가 열리고 10명 전원이 각자 리딩 리포트를 씁니다. 이어서 튜터들과 과외하듯 질문할 수 있습니다. "
                 f"스레드에서 멘션 없이 물으면 맞는 튜터가 답하고, \"정리해줘\"로 리딩 노트를 남깁니다. 대화에서 밝힌 연구 관심·입장은 "
                 f"연구 지향으로 누적되어 모든 에이전트에 반영됩니다(`/reading lens`).\n"
-                f"- `/status [EXP-###]` `/stop` `/resume` `/priority` `/report` `/learn` `/memory` `/reading`")
+                f"- `/status [EXP-###]` `/stop` `/resume` `/amend`(추가 과업) `/priority` `/report` `/learn` `/memory` `/reading`\n"
+                f"- 즉시 알림은 승인 필요·결정 필요·완료 3종이고, 나머지 진행 상황은 매일 하루 요약으로 올라옵니다.")

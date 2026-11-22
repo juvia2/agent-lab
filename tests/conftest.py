@@ -59,6 +59,7 @@ def T(name, **inp):
 def make_lab(tmp_path):
     def _make(script, *, tokens=100, **cfg_over):
         cfg_over.setdefault("light_approval", "auto")      # 경량 승인 버튼을 누를 사람이 없으니 테스트는 자동 승인(기록은 남음)
+        cfg_over.setdefault("infra_retry_wait_s", 0)
         cfg = dataclasses.replace(Config.from_env(), lab_home=tmp_path / "lab", sandbox_backend="host",
                                   anthropic_api_key=None, **cfg_over)
         cfg.ensure_dirs()

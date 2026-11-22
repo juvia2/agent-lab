@@ -344,7 +344,7 @@ def test_role_without_route_uses_default():
 
 # ------------------------------------------------------------ 파이프라인 통합
 def make_routed_lab(tmp_path, scripted, routes, backends):
-    cfg = dataclasses.replace(Config.from_env(), lab_home=tmp_path / "lab", sandbox_backend="host", light_approval="auto",
+    cfg = dataclasses.replace(Config.from_env(), lab_home=tmp_path / "lab", sandbox_backend="host", light_approval="auto", infra_retry_wait_s=0,
                               anthropic_api_key=None, routes=routes)
     cfg.ensure_dirs()
     router = Router(cfg, backends)
@@ -397,13 +397,14 @@ def test_no_backend_pauses_experiment_and_resume_keeps_budget(tmp_path):
               ("director", "linguist", "cogsci", "lm", "statistician", "corpus", "developer", "practitioner", "documenter", "tester", "default")}
     lab, router = make_routed_lab(tmp_path, None, routes, {"claude": dead})
     notifier_msgs = []
-    lab.notifier.post = lambda exp, text, files=None: notifier_msgs.append(text)
+    lab.notifier.post = lambda exp, text, files=None, role=None: notifier_msgs.append(text)
     exp = submit(lab)
     allow_routed_test(lab, exp)
     lab.process_one()
     e = lab.ledger.get(exp["id"])
     assert e["status"] == "paused" and "로그인 필요" in e["error"]
-    assert any("일시정지" in m and "/resume" in m for m in notifier_msgs)
+    assert any("인프라 장애" in m and "일시정지" in m and "연구실장" in m for m in notifier_msgs)   # 첫 정지는 감시자가 먼저 조치
+    assert json.loads(e["meta_json"])["stop_kind"] == "infra"
     budget = e["token_budget"]
     assert "재개" in lab.resume(exp["id"])
     assert lab.ledger.get(exp["id"])["token_budget"] == budget       # 백엔드 문제로 멈춘 것은 예산을 늘리지 않는다

@@ -11,7 +11,7 @@ STATUSES = ("queued", "planning", "awaiting_approval", "running", "analyzing",
             "done", "failed", "stopped", "paused")
 ACTIVE = ("planning", "running", "analyzing")
 PHASE_STATUS = {"consult": "planning", "plan": "planning", "build": "running", "execute": "running",
-                "analyze": "analyzing", "interpret": "analyzing", "report": "analyzing"}
+                "analyze": "analyzing", "interpret": "analyzing", "report": "analyzing", "amend": "analyzing"}
 PHASES = ["consult", "plan", "build", "execute", "analyze", "interpret", "report"]
 
 SCHEMA = """

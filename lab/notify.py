@@ -13,6 +13,10 @@ class Notifier:
         role 을 주면 그 역할의 팀원 봇 이름으로 보낸다(봇이 없으면 연구실장 봇이 대신 보낸다)."""
         raise NotImplementedError
 
+    def digest(self, exp: dict | None, text: str, files: list[Path] | None = None, role: str | None = None) -> None:
+        """즉시 알릴 3종(승인 필요·결정 필요·완료)이 아닌 진행 알림. 디스코드는 하루 요약으로 모으고(watch.py), 콘솔은 바로 출력한다."""
+        self.post(exp, text, files, role=role)
+
     def post_report(self, exp: dict, text: str, files: list[Path] | None = None) -> None:
         """완료 보고서를 실험 스레드와 결과물 채널에 올린다."""
         self.post(exp, text, files)

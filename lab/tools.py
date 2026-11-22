@@ -406,7 +406,7 @@ class Toolbox:
         if now - self._last_progress < 45:
             return ToolOutput("너무 자주 보고함. 잠시 후 다시.")
         self._last_progress = now
-        self.notify.post({"id": self.exp_id}, f"{message[:900]}", role=self.role)
+        self.notify.digest({"id": self.exp_id}, f"{message[:900]}", role=self.role)
         return ToolOutput("보고함")
 
     # ---- 종료 도구: payload 만 돌려주고 루프를 끝낸다 ----

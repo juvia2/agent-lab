@@ -13,6 +13,10 @@ class Stopped(Exception):
     pass
 
 
+class Refused(RuntimeError):
+    """에이전트가 단계 제출 도구를 부르지 않고 끝났다(모델 거절·포기). 정지 사유 '모델 거절'."""
+
+
 class NoBackend(Exception):
     """이 역할에 쓸 수 있는 모델 백엔드가 하나도 없다(한도 소진·로그인 풀림 등). 실험은 일시정지된다."""
 
