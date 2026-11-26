@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 from pathlib import Path
 
 
@@ -11,12 +12,53 @@ def sha256(path: Path) -> str:
 
 
 def code_sha256(exp_dir: Path) -> str:
-    """code/ 아래 파일(캐시 제외) 전체의 지문. 본 실행 뒤 코드가 바뀌었는지 가린다."""
+    """code/·results/code/ 아래 파일(캐시 제외) 전체의 지문. 본 실행 뒤 코드가 바뀌었는지 가린다."""
     h = hashlib.sha256()
-    for p in sorted((exp_dir / "code").rglob("*")):
-        if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc":
-            h.update(str(p.relative_to(exp_dir)).encode() + b"\0" + p.read_bytes() + b"\0")
+    for p in code_files(exp_dir):
+        h.update(str(p.relative_to(exp_dir)).encode() + b"\0" + p.read_bytes() + b"\0")
     return h.hexdigest()
+
+
+def _files(path: Path) -> list[Path]:
+    found = [path] if path.is_file() else sorted(path.rglob("*"))
+    return [p for p in found if p.is_file() and not {"__pycache__", ".pytest_cache"} & set(p.parts) and p.suffix != ".pyc"]
+
+
+def code_files(exp_dir: Path) -> list[Path]:
+    return _files(exp_dir / "code") + _files(exp_dir / "results" / "code")
+
+
+def check_prebuild(steps) -> list[dict]:
+    """계획의 선행 단계 [{role, task, outputs}]. 산출물은 실험 폴더의 notes/·results/·code/ 안의 파일이나 하위 폴더(/로 끝남)."""
+    from .tools import CONSULTANTS
+    if not isinstance(steps, list):
+        raise ValueError("prebuild must be a list")
+    for s in steps:
+        if not isinstance(s, dict) or s.get("role") not in CONSULTANTS or not str(s.get("task") or "").strip():
+            raise ValueError(f"prebuild step needs a consultant role and a task: {s}")
+        outs = s.get("outputs")
+        if not isinstance(outs, list) or not outs:
+            raise ValueError(f"prebuild step needs outputs: {s['role']}")
+        for o in outs:
+            if (not isinstance(o, str) or posixpath.normpath(o) != o.rstrip("/")
+                    or not o.startswith(("notes/", "results/", "code/")) or "/" not in o.rstrip("/")):
+                raise ValueError(f"prebuild output must be a path under notes/, results/ or code/: {o}")
+    return steps
+
+
+def output_hashes(exp_dir: Path, outputs: list[str]) -> tuple[dict[str, str], list[str]]:
+    """(파일별 sha256, 비어 있거나 없는 산출물)."""
+    hashes, missing = {}, []
+    for o in outputs:
+        files = [p for p in _files(exp_dir / o) if p.stat().st_size]
+        if not files:
+            missing.append(o)
+        hashes.update({str(p.relative_to(exp_dir)): sha256(p) for p in files})
+    return hashes, missing
+
+
+def changed_files(exp_dir: Path, hashes: dict[str, str]) -> list[str]:
+    return [f for f, h in hashes.items() if not (exp_dir / f).is_file() or sha256(exp_dir / f) != h]
 
 
 def write_protocol(exp_dir: Path, commands: list[str]) -> Path:

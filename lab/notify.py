@@ -9,7 +9,7 @@ log = logging.getLogger("lab.notify")
 
 class Notifier:
     def post(self, exp: dict | None, text: str, files: list[Path] | None = None, role: str | None = None) -> None:
-        """실험 스레드(없으면 실험진행 채널)에 메시지를 보낸다.
+        """실험 스레드(없으면 만들어서)에 메시지를 보낸다. 보내지 못하면 False.
         role 을 주면 그 역할의 팀원 봇 이름으로 보낸다(봇이 없으면 연구실장 봇이 대신 보낸다)."""
         raise NotImplementedError
 
@@ -27,6 +27,10 @@ class Notifier:
     def ask_command_approval(self, exp: dict, req: dict) -> None:
         """경량 승인(재학습 없는 재집계·점검 명령) 요청. 기본은 글로만 알리고 /approve 로 승인."""
         self.post(exp, command_approval_text(exp, req), role=req.get("role"))
+
+    def flush_held(self) -> int:
+        """보내지 못해 보류한 글을 다시 보낸다(디스코드만)."""
+        return 0
 
     def broadcast(self, text: str) -> None:
         self.post(None, text)

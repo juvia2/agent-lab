@@ -1,6 +1,7 @@
 """에이전트에게 주는 도구들. 모든 파일 접근은 실험 폴더 안으로 제한된다."""
 from __future__ import annotations
 
+import posixpath
 import re
 import time
 import json
@@ -18,7 +19,7 @@ WRITE_PREFIXES = {
     **{r: ("notes/", "results/derived/") for r in CONSULTANTS},
     "practitioner": ("results/", "notes/"),
     # results/data_checks/: 자문·해석 단계 점검 산출물을 옮겨 검증하는 곳, results/analysis_notes.md: 분석 메모 교체(보고서 단계 자동 할 일)
-    "developer": ("code/", "results/derived/", "results/data_checks/", "results/analysis_notes.md", "notes/"),
+    "developer": ("code/", "results/code/", "results/derived/", "results/data_checks/", "results/analysis_notes.md", "notes/"),
     "documenter": ("report/", "notes/"),
     "tester": ("review/",),
 }
@@ -114,6 +115,15 @@ SCHEMAS: dict[str, dict] = {
                                    "plan_use": {"type": "string", "description":
                                                 "계획에서 어떻게 쓰는가. '그대로' 또는 '정의 변경: 이유와 예상 차이'(예: 정규화를 NFC·공백으로 좁혀 100→90 예상)"}},
                                    "required": ["item", "value", "source", "plan_use"]}},
+            "prebuild": {"type": "array", "description":
+                         "선행 단계: 구현 전에 전문가가 순서대로 만들 산출물(명세 확정, 코퍼스 생성기, 분석 명세 등). 요청서가 담당과 순서를 정했으면 "
+                         "그대로 옮긴다. 개발자는 이 산출물이 모두 나온 뒤에 시작하고, 나온 파일은 고정된다. 없으면 빈 배열",
+                         "items": {"type": "object", "properties": {
+                             "role": {"type": "string", "enum": list(CONSULTANTS)},
+                             "task": {"type": "string", "description": "할 일과 완료 기준"},
+                             "outputs": {"type": "array", "items": {"type": "string"},
+                                         "description": "만들 파일 또는 폴더(/로 끝냄). notes/·results/·code/ 안. 이 밖에는 write_file 로 쓸 수 없다"}},
+                             "required": ["role", "task", "outputs"]}},
             "risks": {"type": "array", "items": {"type": "string"}}},
             "required": ["plan_markdown", "summary", "needs_network", "needs_host_accel", "est_runtime_min", "run_commands",
                          "consult_values"]}},
@@ -170,7 +180,7 @@ SCHEMAS: dict[str, dict] = {
 }
 
 _CONSULT_TOOLS = ["list_files", "read_file", "write_file", "run_command", "search_notebook",
-                  "read_past_experiment", "list_data", "submit_memo"]
+                  "read_past_experiment", "list_data", "submit_memo", "finish_build"]
 ROLE_TOOLS = {
     **{r: list(_CONSULT_TOOLS) for r in CONSULTANTS},
     "practitioner": ["list_files", "read_file", "write_file", "run_command", "list_data", "search_notebook",
@@ -192,10 +202,11 @@ class Toolbox:
     def __init__(self, *, cfg, exp_id: str, role: str, sandbox, notebook, notify,
                  network_allowed: bool = False, host_allowed: bool = False,
                  enforce_protocol: bool = False, approved_protocol_sha256: str | None = None,
-                 enforce_commands: bool = False, should_stop=None):
+                 enforce_commands: bool = False, should_stop=None, extra_write: tuple = ()):
         self.cfg, self.exp_id, self.role = cfg, exp_id, role
         self.enforce_commands = enforce_commands      # 승인 뒤 단계의 개발자: 승인 목록 밖 명령은 실행 거부(approvals.py)
         self.should_stop = should_stop
+        self.extra_write = extra_write                # 선행 단계에서 계획이 정한 산출물 위치
         self.sandbox, self.notebook, self.notify = sandbox, notebook, notify
         self.network_allowed = network_allowed
         self.host_allowed = host_allowed
@@ -215,10 +226,8 @@ class Toolbox:
         return p
 
     def _writable(self, rel: str) -> bool:
-        norm = str(Path(rel)).replace("\\", "/")
-        while norm.startswith("./"):
-            norm = norm[2:]
-        return any(norm.startswith(pref) for pref in WRITE_PREFIXES.get(self.role, ()))
+        norm = posixpath.normpath(rel.replace("\\", "/"))      # '..' 로 허용 폴더를 벗어나지 못하게 먼저 정리한다
+        return any(norm.startswith(pref) for pref in WRITE_PREFIXES.get(self.role, ()) + tuple(self.extra_write))
 
     # ---- 실행 ----
     def execute(self, name: str, args: dict) -> ToolOutput:
@@ -261,7 +270,7 @@ class Toolbox:
     def t_write_file(self, path: str, content: str) -> ToolOutput:
         p = self._safe(path)
         if not self._writable(path):
-            return ToolOutput(f"이 역할({self.role})은 '{path}'에 쓸 수 없음. 허용: {WRITE_PREFIXES.get(self.role)}",
+            return ToolOutput(f"이 역할({self.role})은 '{path}'에 쓸 수 없음. 허용: {WRITE_PREFIXES.get(self.role, ()) + tuple(self.extra_write)}",
                               is_error=True)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")

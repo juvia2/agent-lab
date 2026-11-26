@@ -21,7 +21,7 @@ from .llm import BudgetExceeded, NoBackend, Refused, Stopped, run_agent
 from .notebook import Notebook
 from .notify import Notifier
 from .policy import load_policy
-from .protocol import check_protocol, code_sha256, sha256, write_protocol
+from .protocol import changed_files, check_prebuild, check_protocol, code_files, code_sha256, output_hashes, sha256, write_protocol
 from .sandbox import Sandbox
 from .tools import CONSULT_SECTION, CONSULTANTS, ROLE_TOOLS, Toolbox, consult_values, tool_schemas
 
@@ -70,7 +70,7 @@ def memo_post(m: dict) -> str:
 # ---- 자문·해석 단계 산출물 승격(notes → results/data_checks) ----
 # notes/ 의 작업 메모 가운데 파이프라인이 쓰는 파일은 승격 대상이 아니다. 나머지(점검 스크립트·출력)는 수치의 근거라
 # results/data_checks/<단계>/ 로 옮겨 보고서가 인용할 수 있게 한다(EXP-001: 자문의 정확 일치 50건이 notes 에 갇혀 보고서에서 빠짐).
-SYSTEM_NOTES = re.compile(r"^(consult_.*\.md|approved_change_.*\.md|approved_command_.*\.md|build\.(json|md)|execution\.json|"
+SYSTEM_NOTES = re.compile(r"^(consult_.*\.md|approved_plan\.md|approved_change_.*\.md|approved_command_.*\.md|build\.(json|md)|execution\.json|"
                           r"analysis_build\.json|analysis_notes.*|deviations\.md|fix_response\.md|perf_reports\.jsonl|"
                           r"analysis_notes_replace\.md)$")
 PROMOTE_MAX_BYTES = 20_000_000
@@ -235,6 +235,8 @@ class Lab:
                 ("current", "proposed", "reason", "impact")) +
                 (f"- run_commands: {change['run_commands']}\n" if "run_commands" in change else "") + "\n",
                 encoding="utf-8")
+        if exp["phase"] == "build":               # 계획 승인: 개발자·실무 담당이 승인 사실을 확인할 수 있게 남긴다
+            meta["plan_approved"] = time.strftime("%Y-%m-%d %H:%M")
         if exp["phase"] == "build" or (change and "run_commands" in change):
             try:
                 check_protocol(self.cfg.experiments_dir / exp["id"])
@@ -242,6 +244,11 @@ class Lab:
                 return f"{exp_id}: 실행 명세 오류: {error}"
             meta["approved_protocol_sha256"] = sha256(self.cfg.experiments_dir / exp["id"] / "protocol.json")
         self.ledger.update(exp["id"], meta_json=json.dumps(meta, ensure_ascii=False))
+        if exp["phase"] == "build":
+            (self.cfg.experiments_dir / exp["id"] / "notes" / "approved_plan.md").write_text(
+                f"# 연구자 계획 승인\n\n- 승인 시각: {meta['plan_approved']}\n- 사유: {exp['approval_reasons']}\n"
+                f"- 승인된 실행 명세 sha256: {meta['approved_protocol_sha256']}\n"
+                "- plan.md 의 제안값을 그대로 확정한다.\n", encoding="utf-8")
         self.ledger.update(exp["id"], approved=1, status="queued")
         self.ledger.add_event(exp["id"], "approved", "연구자 승인: " + (exp["approval_reasons"] or ""))
         self.notifier.digest(self.ledger.get(exp["id"]), f"{exp['id']} 승인되었습니다. 작업을 이어갑니다.")
@@ -508,14 +515,16 @@ class Lab:
         return lambda: self.ledger.get(eid)["status"] == "stopped"
 
     def _call(self, eid: str, role: str, prompt: str, *, only: list[str] | None = None, network: bool = False,
-              host: bool = False, max_tokens: int = 8192):
+              host: bool = False, max_tokens: int = 8192, write: tuple = ()):
+        if only is None and role in CONSULTANTS:
+            only = _only(role, "finish_build")        # 메모 단계에는 선행 단계용 종료 도구를 주지 않는다
         tb = Toolbox(cfg=self.cfg, exp_id=eid, role=role, sandbox=self.sandbox, notebook=self.notebook,
                      notify=self.notifier, network_allowed=network, host_allowed=host,
                      enforce_protocol=role == "practitioner" and self.ledger.get(eid)["phase"] not in ("consult", "plan"),
                      approved_protocol_sha256=self._meta(eid).get("approved_protocol_sha256"),
                      # 본 실행 이후(전체 분석·보고서 수정)의 개발자 명령은 승인 목록으로 강제한다(approvals.py)
                      enforce_commands=role == "developer" and self.ledger.get(eid)["phase"] in ("analyze", "report", "amend"),
-                     should_stop=self._stop_fn(eid))
+                     should_stop=self._stop_fn(eid), extra_write=write)
         policy = load_policy(self.cfg, eid)
         system, tools, execute, trace = system_for(role, self.cfg), tool_schemas(role, only), tb.execute, None
         if role in ASK_ROLES:                     # 팀원은 일하다 막히면 동료에게 묻는다. 질문·답은 실험 스레드에 각자 이름으로 올라간다
@@ -564,6 +573,10 @@ class Lab:
         note = self._meta(exp["id"]).get("bounce_note")
         back = (f"## 다음 단계에서 되돌아온 문제(먼저 해결)\n{PHASE_LABEL.get(note['from'], note['from'])} 단계가 받은 산출물: {note['text']}\n\n"
                 if note and note.get("phase") == exp["phase"] else "")
+        when = exp["approved"] and self._meta(exp["id"]).get("plan_approved")
+        if when:
+            back += (f"## 계획 승인 상태\n연구자가 plan.md 를 승인했다({when}, notes/approved_plan.md). plan.md 에 '승인 요청안'·'승인 전 금지'라고 "
+                     "적혀 있어도 그 조건은 충족됐고 제안값은 확정값이다. 제안값조차 없는 미결정 항목이 있으면 그 항목만 보고한다.\n\n")
         return (back + f"실험 ID: {exp['id']}\n제목: {exp['title']}\n지금 단계: {stage}\n"
                 f"작업 디렉터리가 곧 실험 폴더이다(상대경로 사용).\n"
                 f"네트워크: {'허용' if network else '차단'} / 호스트 직접 실행: {'허용(where=host, 이때 /data 대신 $LAB_DATA 사용)' if host else '불가'}\n\n"
@@ -660,7 +673,15 @@ class Lab:
             return self._fail(eid, "계획에 승인할 본 실행 명령(run_commands)이 없음")
         cv = [v for v in plan.get("consult_values") or [] if isinstance(v, dict)]
         plan["consult_values"] = cv
-        (d / "plan.md").write_text(plan["plan_markdown"].rstrip() + "\n\n" + consult_table_md(cv) + "\n", encoding="utf-8")
+        try:
+            prebuild = check_prebuild(plan.get("prebuild") or [])
+        except ValueError as error:
+            return self._fail(eid, f"계획의 선행 단계 오류: {error}")
+        self._set_meta(eid, prebuild=prebuild, prebuild_done=[])
+        steps = ("\n\n## 선행 단계 (자동 기록, 구현 전에 이 순서로)\n" + "\n".join(
+            f"{i}. {label(s['role'])}: {s['task']} → {', '.join(s['outputs'])}" for i, s in enumerate(prebuild, 1))
+            if prebuild else "")
+        (d / "plan.md").write_text(plan["plan_markdown"].rstrip() + steps + "\n\n" + consult_table_md(cv) + "\n", encoding="utf-8")
         (d / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
             write_protocol(d, plan["run_commands"])
@@ -687,6 +708,42 @@ class Lab:
         return True
 
     # ================= 단계 3: 구현 =================
+    def _prebuild(self, exp: dict) -> bool:
+        """계획이 정한 선행 산출물을 전문가가 순서대로 만든다. 나온 파일은 고정하고, 바뀌면 그 단계부터 다시 한다."""
+        eid, d = exp["id"], self.cfg.experiments_dir / exp["id"]
+        steps, done = self._meta(eid).get("prebuild") or [], self._meta(eid).get("prebuild_done") or []
+        keep = []
+        for s, h in zip(steps, done):
+            if changed_files(d, h) or output_hashes(d, s["outputs"])[1]:
+                break
+            keep.append(h)
+        network, host = self._perms(exp)
+        for n, s in enumerate(steps[len(keep):], len(keep) + 1):
+            self._set_meta(eid, prebuild_done=keep)
+            role = s["role"]
+            self._say(eid, f"{label(role)} 선행 단계 {n}/{len(steps)} 시작: {_short(s['task'], 300)}")
+            frozen = [f for h in keep for f in h]
+            res = self._call(
+                eid, role, self._header(exp, f"prebuild(선행 단계 {n}/{len(steps)})") +
+                "\n\n자문·해석이 아니라 산출물을 직접 만드는 단계다. plan.md 와 notes/ 를 읽고 아래 일만 하세요. 코드가 필요하면 쓰고 `run_command`로 시험하세요. "
+                "학습 코드 구현과 본 실행은 하지 않습니다. 완료 기준을 확인한 근거를 남기고 `finish_build`로 끝내세요"
+                "(기준을 못 채우면 status=partial 과 이유, entrypoints 는 없으면 빈 배열).\n\n"
+                f"## 할 일\n{s['task']}\n\n## 산출물(여기에 써야 완료)\n" + "\n".join(f"- {o}" for o in s["outputs"]) +
+                ("\n\n## 앞 단계가 고정한 파일(읽기만, 바꾸면 실패)\n" + "\n".join(f"- {f}" for f in frozen[:60]) if frozen else ""),
+                only=_only(role, "submit_memo"), network=network, host=host, write=tuple(s["outputs"]))
+            b = res.terminal or {"status": "partial", "summary": "종료 보고 없이 멈춤: " + _short(res.text, 300)}
+            self._say(eid, f"{label(role)} 선행 단계 {n}/{len(steps)} {b['status']}\n{_short(b['summary'], 700)}")
+            if b["status"] != "ready":
+                return self._fail(eid, f"선행 단계 미완료({label(role)}): {b['summary']}")
+            hashes, missing = output_hashes(d, s["outputs"])
+            if missing:
+                return self._fail(eid, f"선행 단계({label(role)}) 산출물 없음: " + ", ".join(missing))
+            if changed := [f for h in keep for f in changed_files(d, h)]:
+                return self._fail(eid, f"선행 단계({label(role)})가 고정된 산출물을 바꿈: " + ", ".join(changed[:20]))
+            keep = keep + [hashes]
+            self._set_meta(eid, prebuild_done=keep)
+        return True
+
     def _phase_build(self, exp: dict) -> bool:
         eid = exp["id"]
         d = self.cfg.experiments_dir / eid
@@ -697,6 +754,8 @@ class Lab:
             check_protocol(d, approved_hash)
         except (ValueError, KeyError, OSError) as error:
             return self._fail(eid, f"구현 전 실행 명세 오류: {error}")
+        if not self._prebuild(exp):
+            return False
         network, host = self._perms(exp)
         meta = self._meta(eid)
         fix_note = meta.get("fix_note")
@@ -719,6 +778,10 @@ class Lab:
                         "## 그다음\n" + task)
                 if promoted:
                     self._say(eid, f"자문 점검 산출물 {len(promoted)}개를 results/data_checks/consult/ 로 옮김 → {label('developer')} 재확인 배정")
+        frozen = {f: h for step in meta.get("prebuild_done") or [] for f, h in step.items()}
+        if frozen:
+            task = ("## 끝난 선행 단계\n전문가가 만든 아래 산출물은 고정됐다. 읽어서 쓰고 바꾸지 마세요(바꾸면 실패). "
+                    "문제가 있으면 고치지 말고 status=partial 로 보고하세요.\n" + "\n".join(f"- {f}" for f in list(frozen)[:60]) + "\n\n" + task)
         self._say(eid, f"{label('developer')} {'수정' if fix_note else '구현'} 시작")
         res = self._call(eid, "developer", self._header(exp, stage) + "\n\n" + task, network=network, host=host)
         b = res.terminal
@@ -730,6 +793,8 @@ class Lab:
                        + (f"\n한계: {_short('; '.join(b['known_limits']), 300)}" if b.get("known_limits") else ""))
         if b["status"] != "ready":
             return self._fail(eid, "구현 미완료: " + b["summary"])
+        if changed := changed_files(d, frozen):
+            return self._fail(eid, "구현 중 고정된 선행 산출물이 바뀜: " + ", ".join(changed[:20]))
         try:
             commands = check_protocol(d, self._meta(eid).get("approved_protocol_sha256"))["run_commands"]
         except (ValueError, KeyError, OSError) as error:
@@ -753,8 +818,8 @@ class Lab:
             return self._fail(eid, f"실행 명세 오류: {error}")
         audit_path = self.cfg.lab_home / "audits" / f"{eid}.jsonl"
         audit_mtime = audit_path.stat().st_mtime if audit_path.exists() else 0.0
-        protected = [d / "request.md", d / "plan.md", d / "plan.json", d / "protocol.json"] + [
-            p for p in (d / "code").rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"]
+        protected = [d / "request.md", d / "plan.md", d / "plan.json", d / "protocol.json"] + code_files(d) + [
+            d / f for step in self._meta(eid).get("prebuild_done") or [] for f in step]
         before = {str(p.relative_to(d)): hashlib.sha256(p.read_bytes()).hexdigest() for p in protected if p.is_file()}
         network, host = self._perms(exp)
         self._say(eid, f"{label('practitioner')} 실행 시작")
@@ -772,8 +837,7 @@ class Lab:
                          network=network, host=host)
         after = {name: hashlib.sha256((d / name).read_bytes()).hexdigest() if (d / name).is_file() else None
                  for name in before}
-        new_code = [p for p in (d / "code").rglob("*") if p.is_file() and "__pycache__" not in p.parts
-                    and p.suffix != ".pyc" and str(p.relative_to(d)) not in before]
+        new_code = [p for p in code_files(d) if str(p.relative_to(d)) not in before]
         changed = [name for name in before if before[name] != after[name]] + [str(p.relative_to(d)) for p in new_code]
         if changed:
             return self._fail(eid, "실무 담당 실행 중 승인된 요청·계획 또는 구현 코드가 변경됨: " + ", ".join(changed[:20]))
@@ -813,7 +877,7 @@ class Lab:
         # 다만 지금 코드로 돌린 기록만 인정한다. 구현 단계로 되돌아가 코드를 고쳤으면 예전 결과는 낡았다.
         code_now = code_sha256(d)
         # shortcut: 코드 해시가 없는 예전 기록(11-16 이전, EXP-001)은 그 기록 이후 코드가 안 바뀐 경우만 인정한다. 그런 기록이 없어지면 지운다.
-        legacy_ok = all(p.stat().st_mtime < audit_mtime for p in (d / "code").rglob("*") if p.is_file())
+        legacy_ok = all(p.stat().st_mtime < audit_mtime for p in code_files(d))
 
         def counts(row: dict) -> bool:
             same_code = row["code_sha256"] == code_now if "code_sha256" in row else legacy_ok

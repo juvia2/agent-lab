@@ -105,7 +105,7 @@ def test_digest_collects_and_flushes_once_a_day(tmp_path):
     at20 = time.mktime(time.strptime("2026-11-22 20:00", "%Y-%m-%d %H:%M"))
     assert watch.digest_flush(cfg, n, now=at20) is False                      # 아직 요약 시각 전
     assert watch.digest_flush(cfg, n, now=at20 + 3600) is True
-    assert "하루 요약" in n.sent[0][1] and "계획 확정" in n.sent[0][1] and n.sent[0][0] is None
+    assert "하루 요약" in n.sent[0][1] and "계획 확정" in n.sent[0][1] and n.sent[0][0] == "EXP-001"   # 그 실험의 스레드로
     watch.digest_add(cfg, "EXP-001", "늦은 알림")
     assert watch.digest_flush(cfg, n, now=at20 + 7200) is False               # 하루 한 번, 남은 것은 다음 날로
     assert "늦은" in (tmp_path / "digest" / "pending.jsonl").read_text(encoding="utf-8")

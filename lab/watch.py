@@ -7,6 +7,7 @@ import threading
 import time
 
 log = logging.getLogger("lab.watch")
+_digest_lock = threading.Lock()
 RECOVERABLE = ("infra", "refusal", "error")    # 예산 한도 소진·승인 대기는 사람이 정한다
 
 
@@ -38,7 +39,7 @@ def _dir(cfg):
 
 
 def digest_add(cfg, exp_id: str | None, text: str, role: str | None = None) -> None:
-    with (_dir(cfg) / "pending.jsonl").open("a", encoding="utf-8") as fh:
+    with _digest_lock, (_dir(cfg) / "pending.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"ts": time.time(), "exp": exp_id, "role": role, "text": text[:1500]}, ensure_ascii=False) + "\n")
 
 
@@ -54,23 +55,36 @@ def digest_text(rows: list[dict], per_exp: int = 4) -> str:
 
 
 def digest_flush(cfg, notifier, now: float | None = None, force: bool = False) -> bool:
-    """하루 한 번 digest_hour 이후에 모인 진행 알림을 요약해 접수 채널에 올린다."""
+    """하루 한 번 digest_hour 이후에 모인 진행 알림을 실험마다 그 실험의 스레드에 요약해 올린다(실험과 무관한 것은 점검 채널).
+    보내지 못한 것은 pending 에 남겨 다음 틱에 다시 보낸다."""
     now = now or time.time()
     d = _dir(cfg)
     today = time.strftime("%Y-%m-%d", time.localtime(now))
     mark, pend = d / "last_sent", d / "pending.jsonl"
     if not force and (time.localtime(now).tm_hour < cfg.digest_hour or (mark.exists() and mark.read_text().strip() == today)):
         return False
-    rows = [json.loads(x) for x in pend.read_text(encoding="utf-8").splitlines() if x.strip()] if pend.exists() else []
-    mark.write_text(today)
-    if not rows:
-        return False
-    text = digest_text(rows)
-    notifier.post(None, text[:1900] + ("\n…(전체는 /status EXP-###)" if len(text) > 1900 else ""))
-    with (d / f"sent-{today}.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(pend.read_text(encoding="utf-8"))
-    pend.unlink()
-    return True
+    with _digest_lock:
+        lines = pend.read_text(encoding="utf-8").splitlines() if pend.exists() else []
+    by: dict[str | None, list[str]] = {}
+    for x in lines:
+        if x.strip():
+            by.setdefault(json.loads(x).get("exp"), []).append(x)
+    ok = True
+    for eid, mine in by.items():
+        text = digest_text([json.loads(x) for x in mine])
+        if notifier.post({"id": eid} if eid else None, text[:1900] + ("\n…(전체는 /status EXP-###)" if len(text) > 1900 else "")) is False:
+            ok = False
+            continue
+        with _digest_lock:                # 보낸 줄만 뺀다(보내는 동안 새로 쌓인 줄은 남긴다)
+            with (d / f"sent-{today}.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write("".join(x + "\n" for x in mine))
+            left = [x for x in pend.read_text(encoding="utf-8").splitlines() if x.strip() and x not in mine]
+            tmp = pend.with_suffix(".tmp")
+            tmp.write_text("".join(x + "\n" for x in left), encoding="utf-8")
+            tmp.replace(pend)
+    if ok:
+        mark.write_text(today)
+    return ok and bool(by)
 
 
 def run(lab, stop: threading.Event, every: float = 60.0) -> threading.Thread:
@@ -78,6 +92,7 @@ def run(lab, stop: threading.Event, every: float = 60.0) -> threading.Thread:
         while not stop.wait(every):
             try:
                 watchdog_tick(lab)
+                lab.notifier.flush_held()
                 digest_flush(lab.cfg, lab.notifier)
             except Exception:
                 log.exception("watch tick failed")

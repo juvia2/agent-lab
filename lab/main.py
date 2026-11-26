@@ -95,6 +95,9 @@ def run_check(cfg: Config, router) -> int:
                  else "Developer Portal 에서 토큰을 다시 발급해 .env 에 넣으세요")
     else:
         line(False, "DISCORD_TOKEN 설정", "Developer Portal → Bot → Reset Token")
+    from .director import open_ops_requests
+    for req in open_ops_requests(cfg):
+        print(f"[주의] 반영하지 않은 운영 지시: {req[:200]}")
     # --- 팀원 봇 (선택: 토큰이 없는 팀원은 건너뛰고 연구실장 봇만으로도 동작) ---
     import os
     from .agents import DISPLAY_EN

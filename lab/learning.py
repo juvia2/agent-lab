@@ -80,6 +80,16 @@ def remember_thread(group: str, thread_id: int, base: Path | None = None) -> Non
     f.write_text(json.dumps(m, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def head_for(item: dict, base: Path | None = None) -> int | None:
+    """묶음의 첫 글 ID. 글은 올렸지만 스레드를 아직 못 열었을 때 다시 여는 데 쓴다."""
+    g = item.get("group")
+    return thread_for({"group": f"{g}:head"}, base) if g else None
+
+
+def remember_head(group: str, message_id: int, base: Path | None = None) -> None:
+    remember_thread(f"{group}:head", message_id, base)
+
+
 def publication_allowed(item: dict) -> bool:
     return item.get("classification") == "public" and item.get("publication_approved") is True
 

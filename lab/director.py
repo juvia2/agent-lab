@@ -127,6 +127,12 @@ def _merge(history: list[dict]) -> list[dict]:
     return out
 
 
+def open_ops_requests(cfg) -> list[str]:
+    """아직 반영하지 않은 연구자 운영 지시."""
+    f = cfg.lab_home / "ops_requests.md"
+    return [x[6:].strip() for x in f.read_text(encoding="utf-8").splitlines() if x.startswith("- [ ] ")] if f.exists() else []
+
+
 class Director:
     def __init__(self, lab: Lab):
         self.lab = lab

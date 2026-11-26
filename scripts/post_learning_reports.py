@@ -44,9 +44,23 @@ def enqueue_literature():
         if not f.exists() or role in queued:
             continue
         title, desc = learning.literature_report(f.read_text(encoding="utf-8"))
-        learning.enqueue(role, title, desc, f"knowledge/literature/{role}.md", color=COLOR[role])
+        learning.enqueue(role, title, desc, f"knowledge/literature/{role}.md", color=COLOR[role],
+                         group=f"literature-{time.strftime('%Y%m%d')}")
         n += 1
     print(f"큐에 추가: {n}건")
+
+
+def open_thread(token, cid, item, head):
+    try:
+        tid = call(token, "POST", f"/channels/{cid}/messages/{head}/threads",
+                   {"name": item["title"][:100], "auto_archive_duration": 10080})["id"]
+    except DiscordError as e:
+        if "160004" not in str(e):          # 160004 = 이미 열려 있음(스레드 ID는 글 ID와 같다)
+            print(f"  ⚠️ 스레드 생성 실패({e}) → 나머지는 큐에 남김")
+            return None
+        tid = head
+    learning.remember_thread(item["group"], tid)
+    return tid
 
 
 def main():
@@ -92,6 +106,12 @@ def main():
             continue
         f = learning.attachment(item)
         tid = learning.thread_for(item)             # 같은 과제의 보고는 첫 글에 연 스레드로 모은다
+        head = learning.head_for(item)
+        if head and not tid:
+            tid = open_thread(look, cid, item, head)
+            if not tid:
+                print(f"  ⏸ {name:<24} 스레드를 열지 못함 → 큐에 남김")
+                continue
         try:
             msg = call(tok, "POST", f"/channels/{tid or cid}/messages", {"embeds": [learning.embed(item, name)]},
                        files=[f] if f else None)
@@ -100,12 +120,8 @@ def main():
             print(f"  ❌ {name:<24} {e}{hint} (큐에 남김)")
             continue
         if item.get("group") and not tid:
-            try:
-                th = call(look, "POST", f"/channels/{cid}/messages/{msg['id']}/threads",
-                          {"name": item["title"][:100], "auto_archive_duration": 10080})
-                learning.remember_thread(item["group"], th["id"])
-            except DiscordError as e:
-                print(f"  ⚠️ 스레드 생성 실패({e}) → 나머지는 채널에 올림")
+            learning.remember_head(item["group"], msg["id"])
+            open_thread(look, cid, item, msg["id"])
         learning.mark_sent(path)
         ok += 1
         print(f"  ✅ {name:<24} {item['title']}")

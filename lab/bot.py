@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import discord
 from discord import app_commands
 
-from . import bus, growth, learning, memory, reading
+from . import approvals, bus, growth, learning, memory, reading
 from .ledger import ACTIVE
 from .notify import Notifier
 from .policy import blocked_text, load_policy, set_policy
@@ -182,24 +184,79 @@ class DiscordNotifier(Notifier):
     def __init__(self, cfg):
         self.cfg = cfg
         self.bot: LabBot | None = None
+        self._held_lock = threading.Lock()
+        self._thread_lock = asyncio.Lock()
         self.members: dict = {}           # 역할 → MemberBot (토큰이 있는 팀원만)
 
-    def _run(self, coro, timeout: float = 120):
+    def _run(self, coro, timeout: float = 120) -> bool:
+        """보냈으면 True. 실패하면 부른 쪽이 보류하거나 남긴다."""
         if not self.bot or not self.bot.loop or not self.bot.is_ready():
             coro.close()
-            log.warning("디스코드가 아직 준비되지 않아 알림을 건너뜀")
-            return None
+            log.warning("디스코드가 아직 준비되지 않음")
+            return False
+        fut = asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
         try:
-            return asyncio.run_coroutine_threadsafe(coro, self.bot.loop).result(timeout)
+            fut.result(timeout)
+            return True
         except Exception:
+            fut.cancel()                  # 시간 초과 뒤에 늦게 나가 재시도와 겹치지 않게
             log.exception("디스코드 전송 실패")
-            return None
+            return False
+
+    def _deliver(self, kind: str, exp: dict, p: dict, held: bool = False) -> bool:
+        if not load_policy(self.cfg, exp["id"]).allows_discord:
+            log.warning("%s 디스코드 전송 차단(자료 정책): %s", exp["id"], kind)
+            return True
+        coro = {"post": lambda: self._post(exp, p["text"], p.get("files"), p.get("role")),
+                "report": lambda: self._post_named(self.cfg.report_channel, p["text"], p.get("files")),
+                "ask": lambda: self._ask(exp, p["reasons"], p["summary"]),
+                "command": lambda: self._ask_command(exp, p["req"])}[kind]()
+        ok = self._run(coro)
+        if not ok and not held:           # 채널 본문에 흩어 올리지 않고 보류함에 두었다가 watch.py 가 다시 보낸다
+            row = {"id": uuid.uuid4().hex, "kind": kind, "exp": exp["id"], "p": p}
+            with self._held_lock, self._held_file().open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        return ok
+
+    def _held_file(self) -> Path:
+        d = self.cfg.lab_home / "digest"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / "held.jsonl"
+
+    def _held_rows(self) -> list[dict]:
+        f = self._held_file()
+        return [json.loads(x) for x in f.read_text(encoding="utf-8").splitlines() if x.strip()] if f.exists() else []
+
+    def flush_held(self) -> int:
+        """보류한 글을 다시 보낸다(watch.py 가 1분마다 부른다). 이미 끝난 승인 요청은 버린다."""
+        if not self.bot or not self.bot.is_ready():
+            return 0
+        with self._held_lock:
+            rows = self._held_rows()
+        sent, failed = 0, set()
+        for r in rows:
+            if r["exp"] in failed:        # 같은 실험의 글 순서를 지킨다
+                continue
+            exp = self.bot.lab.ledger.get(r["exp"])
+            stale = not exp or (r["kind"] == "ask" and exp["status"] != "awaiting_approval") or (
+                r["kind"] == "command" and r["p"]["req"]["id"] not in {q["id"] for q in approvals.pending(self.cfg, r["exp"])})
+            if not stale:
+                if not self._deliver(r["kind"], exp, r["p"], held=True):
+                    failed.add(r["exp"])
+                    continue
+                sent += 1
+            with self._held_lock:
+                left = [x for x in self._held_rows() if x["id"] != r["id"]]
+                tmp = self._held_file().with_suffix(".tmp")
+                tmp.write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in left), encoding="utf-8")
+                tmp.replace(self._held_file())
+        return sent
 
     def post(self, exp, text, files=None, role=None):
-        if exp and not load_policy(self.cfg, exp["id"]).allows_discord:
-            log.warning("%s 디스코드 전송 차단: 자료 정책", exp["id"])
-            return
-        self._run(self._post(exp, text, files, role))
+        if not exp:
+            return self._run(self._post(None, text, files, role))
+        self._deliver("post", exp, {"text": text, "files": [str(f) for f in files or []], "role": role})
+        return True                       # 보냈거나 보류함에 있다
 
     def digest(self, exp, text, files=None, role=None):
         if exp and not load_policy(self.cfg, exp["id"]).allows_discord:
@@ -208,23 +265,15 @@ class DiscordNotifier(Notifier):
         digest_add(self.cfg, exp["id"] if exp else None, text, role)
 
     def post_report(self, exp, text, files=None):
-        if not load_policy(self.cfg, exp["id"]).allows_discord:
-            log.warning("%s 결과 게시 차단: 자료 정책", exp["id"])
-            return
-        self._run(self._post(exp, text, files))
-        self._run(self._post_named(self.cfg.report_channel, text, files))
+        p = {"text": text, "files": [str(f) for f in files or []]}
+        self._deliver("post", exp, p)
+        self._deliver("report", exp, p)
 
     def ask_approval(self, exp, reasons, plan_summary):
-        if not load_policy(self.cfg, exp["id"]).allows_discord:
-            log.warning("%s 승인 요청 디스코드 전송 차단: 로컬 콘솔에서 확인 필요", exp["id"])
-            return
-        self._run(self._ask(exp, reasons, plan_summary))
+        self._deliver("ask", exp, {"reasons": reasons, "summary": plan_summary})
 
     def ask_command_approval(self, exp, req):
-        if not load_policy(self.cfg, exp["id"]).allows_discord:
-            log.warning("%s 명령 승인 요청 디스코드 전송 차단: 콘솔에서 approve %s", exp["id"], exp["id"])
-            return
-        self._run(self._ask_command(exp, req))
+        self._deliver("command", exp, {"req": req})
 
     async def _ask_command(self, exp, req):
         from .notify import command_approval_text
@@ -236,19 +285,33 @@ class DiscordNotifier(Notifier):
 
     # ---- 비동기 구현 ----
     async def _channel_for(self, exp):
+        """실험 글은 그 실험의 스레드로만 간다. 스레드가 없으면(로컬·DM 접수, 삭제됨) 만들어 장부에 적는다.
+        못 만들거나 못 찾으면 채널 본문으로 새지 않게 예외를 낸다(_deliver 가 보류)."""
         bot = self.bot
-        if exp:
+        if not exp:
+            return await self._named(self.cfg.test_channel)
+        async with self._thread_lock:     # 동시에 올라온 글이 스레드를 둘 만들지 않게
             e = bot.lab.ledger.get(exp["id"])
-            tid = e and e.get("thread_id")
+            if not e:
+                raise LookupError(f"{exp['id']} 이(가) 장부에 없음")
+            tid = e.get("thread_id")
             if tid:
                 try:
                     ch = bot.get_channel(tid) or await bot.fetch_channel(tid)
                     if isinstance(ch, discord.Thread) and ch.archived:
                         await ch.edit(archived=False)
                     return ch
-                except discord.DiscordException:
-                    log.warning("스레드 %s 를 찾지 못함", tid)
-        return await self._named(self.cfg.intake_channel if exp else self.cfg.test_channel)
+                except discord.NotFound:
+                    log.warning("%s 스레드 %s 가 삭제됨 → 새로 만듦", e["id"], tid)
+            intake = next((c for g in bot.guilds if not self.cfg.discord_guild_id or g.id == self.cfg.discord_guild_id
+                           for c in g.text_channels if c.name == self.cfg.intake_channel), None)
+            if intake is None:
+                raise LookupError(f"#{self.cfg.intake_channel} 채널이 없어 스레드를 만들 수 없음")
+            th = await intake.create_thread(name=f"{e['id']} {e['title']}"[:100], type=discord.ChannelType.public_thread,
+                                            auto_archive_duration=10080)
+            bot.lab.ledger.update(e["id"], thread_id=th.id, channel_id=intake.id)
+            log.info("%s 스레드 생성: %s", e["id"], th.id)
+            return th
 
     async def _named(self, name: str):
         for g in self.bot.guilds:
@@ -301,6 +364,8 @@ class DiscordNotifier(Notifier):
         text = (f"<@{owner}> **{exp['id']}** 승인이 필요합니다.\n"
                 f"사유:\n" + "\n".join(f"- {r}" for r in reasons) +
                 f"\n\n계획 요약:\n{plan_summary[:900]}\n\n계획 전문은 `plan.md` 에 있습니다(스레드에서 물어보세요).")
+        if self.bot.lab.ledger.get(exp["id"])["phase"] == "build":     # 실행 중 변경 승인이 아니라 계획 승인
+            text += "\n승인하면 계획의 제안값을 그대로 확정합니다. 바꿀 것이 있으면 거부하고 스레드에 적어 주세요."
         view = discord.ui.View(timeout=None)
         view.add_item(ApprovalButton("approve", exp["id"]))
         view.add_item(ApprovalButton("reject", exp["id"]))
@@ -435,12 +500,30 @@ class LabBot(discord.Client):
             log.warning("#%s 채널이 없어 학습 보고를 보내지 못함", self.cfg.perf_channel)
             return 0
         from .agents import DISPLAY_EN
+
+        async def open_thread(item, head: int) -> int | None:
+            try:
+                tid = (await ch.get_partial_message(head).create_thread(name=item["title"][:100],
+                                                                        auto_archive_duration=10080)).id
+            except discord.DiscordException as e:
+                if getattr(e, "code", None) != 160004:      # 160004 = 이미 열려 있음(글에서 연 스레드 ID는 글 ID와 같다)
+                    log.warning("학습 보고 스레드 생성 실패 → 나머지는 큐에 남김")
+                    return None
+                tid = head
+            learning.remember_thread(item["group"], tid)
+            return tid
+
         sent = 0
         for path, item in items:
             if not learning.publication_allowed(item):
                 continue
             role = item.get("role", "director")
             tid = learning.thread_for(item)         # 같은 과제의 보고는 첫 글에 연 스레드로 모은다
+            head = learning.head_for(item)
+            if head and not tid:                    # 앞서 스레드를 못 열었다: 다시 열고, 안 되면 큐에 남긴다
+                tid = await open_thread(item, head)
+                if not tid:
+                    continue
             dest_id = tid or ch.id
             member = self.notifier.members.get(role)
             target = None
@@ -463,12 +546,8 @@ class LabBot(discord.Client):
                 log.warning("%s 학습 보고 전송 실패(다음 주기에 재시도)", role)
                 continue
             if item.get("group") and not tid:
-                try:
-                    th = await ch.get_partial_message(msg.id).create_thread(name=item["title"][:100],
-                                                                             auto_archive_duration=10080)
-                    learning.remember_thread(item["group"], th.id)
-                except discord.DiscordException:
-                    log.warning("학습 보고 스레드 생성 실패 → 나머지는 채널에 올림")
+                learning.remember_head(item["group"], msg.id)
+                await open_thread(item, msg.id)
             learning.mark_sent(path)
             sent += 1
             await asyncio.sleep(0.7)
